@@ -1,0 +1,13 @@
+# Environment Configuration for Agentic Honey-Pot System
+
+# Groq AI API Key for LLM operations (scam detection and agent responses)
+GROQ_API_KEY=your_groq_api_key_here
+
+# API Key for securing your honeypot endpoint
+HONEYPOT_API_KEY=mySecretKey123
+
+# Optional: Development/Production mode
+ENVIRONMENT=production
+
+# Optional: Logging level
+LOG_LEVEL=INFO
