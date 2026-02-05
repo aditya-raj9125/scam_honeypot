@@ -98,6 +98,76 @@ class LLMJudgement:
 
 
 @dataclass
+class AgentMemory:
+    """
+    AGENT MEMORY OBJECT - Built on every turn for context awareness.
+    
+    This is the CORE solution to the memory/context problem.
+    The agent uses this to:
+    1. Know what was already asked
+    2. Know what intelligence is already extracted
+    3. Know what stage the conversation is in
+    4. Generate contextually appropriate responses
+    5. Avoid repetition and loops
+    """
+    # Conversation awareness
+    conversation_summary: str  # Short summary of previous turns
+    turn_count: int
+    
+    # Question tracking (anti-loop)
+    questions_already_asked: List[str]  # List of question intents already used
+    questions_by_intent: Dict[str, int]  # intent -> count
+    
+    # Intelligence tracking
+    intelligence_extracted: Dict[str, List[str]]  # What we already know
+    missing_intelligence: List[str]  # What we still need
+    
+    # Detection state
+    scam_detected: bool
+    current_stage: str  # NORMAL, HOOK, THREAT, ACTION, CONFIRMED
+    risk_score: int
+    
+    # Language context
+    reply_language: str  # "hindi" or "english"
+    
+    # Strategic state
+    is_stalled: bool  # No new intel in last 3 turns
+    should_terminate: bool  # Time to exit gracefully
+    
+    def get_context_for_llm(self) -> str:
+        """
+        Generate a compact context string for LLM prompt.
+        This ensures the LLM knows the conversation state.
+        """
+        parts = []
+        
+        # Conversation context
+        if self.conversation_summary:
+            parts.append(f"Previous: {self.conversation_summary}")
+        
+        # What we know
+        known_items = []
+        for key, values in self.intelligence_extracted.items():
+            if values:
+                known_items.append(f"{key}: {', '.join(values[:2])}")
+        if known_items:
+            parts.append(f"Already know: {'; '.join(known_items)}")
+        
+        # What NOT to ask again
+        if self.questions_already_asked:
+            parts.append(f"Already asked about: {', '.join(self.questions_already_asked[-5:])}")
+        
+        # What we need
+        if self.missing_intelligence:
+            parts.append(f"Still need: {', '.join(self.missing_intelligence[:3])}")
+        
+        # Stage
+        parts.append(f"Stage: {self.current_stage}, Turn: {self.turn_count}")
+        
+        return " | ".join(parts)
+
+
+@dataclass
 class PersonaState:
     """Dynamic persona state that drifts during conversation"""
     base_persona: str = "middle-class Indian citizen"
@@ -204,6 +274,17 @@ class SessionState:
         self.stall_counter: int = 0  # Turns without new intel
         self.last_intel_turn: int = 0  # Last turn with new extraction
         self.should_terminate: bool = False  # Graceful exit flag
+        
+        # ===================================================================
+        # NEW: Filler phrase tracking - prevents repetitive excuses
+        # ===================================================================
+        self.used_fillers: List[str] = []  # Track used filler phrases
+        
+        # ===================================================================
+        # NEW: Conversation history tracking - for memory/context
+        # ===================================================================
+        self.conversation_turns: List[Dict] = []  # Full turn history
+        self.last_scammer_intents: List[str] = []  # What scammer asked for
     
     # ===================================================================
     # LANGUAGE LOCKING METHODS
@@ -297,23 +378,163 @@ class SessionState:
         """
         Check if agent should gracefully exit.
         
-        Terminate if:
-        - At least 1 high-value artifact extracted AND
-        - (Stalled for 3+ turns OR max turns reached OR scammer repeating)
+        BALANCED TERMINATION:
+        - Allow at least 5 turns for extraction attempts
+        - Then check stall (no new intel in 3 turns)
+        - Or max turns (12) reached
+        - Or all question intents exhausted
         """
         if self.should_terminate:
             return True
         
-        has_intel = self.has_high_value_intel()
-        is_stalled = self.check_stall()
-        max_turns = self.turn_count >= 20
+        # Don't terminate too early - allow some extraction attempts
+        if self.turn_count < 5:
+            return False
         
-        if has_intel and (is_stalled or max_turns):
+        is_stalled = self.check_stall()
+        max_turns = self.turn_count >= 12
+        intents_exhausted = len([k for k, v in self.question_intents.items() if v >= 2]) >= 5
+        
+        # Terminate if stalled OR max turns OR all intents used
+        if is_stalled or max_turns or intents_exhausted:
             self.should_terminate = True
-            logger.info(f"🛑 Graceful termination triggered: stalled={is_stalled}, max_turns={max_turns}")
+            logger.info(f"🛑 Graceful termination: stalled={is_stalled}, turns={self.turn_count}, intents_exhausted={intents_exhausted}")
             return True
         
         return False
+    
+    def add_filler(self, filler: str) -> bool:
+        """
+        Track filler phrase usage to prevent repetition.
+        Returns True if filler is allowed (not used before).
+        """
+        filler_key = filler.lower().strip()[:30]  # Normalize
+        if filler_key in self.used_fillers:
+            return False
+        self.used_fillers.append(filler_key)
+        return True
+    
+    def get_unused_filler(self, fillers: List[str]) -> Optional[str]:
+        """Get a filler that hasn't been used yet."""
+        for f in fillers:
+            if f.lower().strip()[:30] not in self.used_fillers:
+                self.used_fillers.append(f.lower().strip()[:30])
+                return f
+        return None
+    
+    # ===================================================================
+    # CONVERSATION MEMORY METHODS
+    # ===================================================================
+    
+    def add_turn(self, sender: str, text: str, intent: str = None):
+        """
+        Record a conversation turn for memory tracking.
+        
+        Args:
+            sender: "scammer" or "agent"
+            text: The message text
+            intent: Optional intent classification
+        """
+        turn = {
+            "turn": self.turn_count,
+            "sender": sender,
+            "text": text[:200],  # Truncate for memory
+            "intent": intent or "unknown"
+        }
+        self.conversation_turns.append(turn)
+        
+        # Track scammer intents separately
+        if sender == "scammer" and intent:
+            self.last_scammer_intents.append(intent)
+            if len(self.last_scammer_intents) > 5:
+                self.last_scammer_intents.pop(0)
+    
+    def get_conversation_summary(self, max_turns: int = 5) -> str:
+        """
+        Generate a compact summary of recent conversation.
+        
+        Returns a short string summarizing the last N turns.
+        """
+        if not self.conversation_turns:
+            return "First message in conversation."
+        
+        recent = self.conversation_turns[-max_turns:]
+        summary_parts = []
+        
+        for turn in recent:
+            sender = "S" if turn["sender"] == "scammer" else "A"
+            text = turn["text"][:50]  # Very short
+            summary_parts.append(f"{sender}: {text}")
+        
+        return " → ".join(summary_parts)
+    
+    def get_extracted_intelligence_dict(self) -> Dict[str, List[str]]:
+        """
+        Get all extracted intelligence as a dictionary.
+        """
+        return {
+            "upi_ids": self.upi_ids.copy(),
+            "bank_accounts": self.bank_accounts.copy(),
+            "phone_numbers": self.phone_numbers.copy(),
+            "phishing_links": self.phishing_links.copy(),
+            "suspicious_keywords": self.suspicious_keywords[:10]  # Limit
+        }
+    
+    def get_missing_intelligence(self) -> List[str]:
+        """
+        Determine what intelligence is still missing.
+        
+        Returns list of intelligence types we still need.
+        """
+        missing = []
+        if not self.upi_ids:
+            missing.append("upi_id")
+        if not self.bank_accounts:
+            missing.append("bank_account")
+        if not self.phone_numbers:
+            missing.append("phone_number")
+        if not self.phishing_links:
+            missing.append("phishing_link")
+        return missing
+    
+    def get_asked_intents_list(self) -> List[str]:
+        """
+        Get list of question intents already asked by the agent.
+        """
+        return list(self.question_intents.keys())
+    
+    def build_agent_memory(self) -> 'AgentMemory':
+        """
+        BUILD THE AGENT MEMORY OBJECT.
+        
+        This is the CORE METHOD for context awareness.
+        Called BEFORE generating every response.
+        
+        Returns an AgentMemory object with:
+        - Conversation summary
+        - Questions already asked
+        - Intelligence extracted so far
+        - Missing intelligence
+        - Detection state
+        - Strategic state
+        """
+        memory = AgentMemory(
+            conversation_summary=self.get_conversation_summary(),
+            turn_count=self.turn_count,
+            questions_already_asked=self.get_asked_intents_list(),
+            questions_by_intent=self.question_intents.copy(),
+            intelligence_extracted=self.get_extracted_intelligence_dict(),
+            missing_intelligence=self.get_missing_intelligence(),
+            scam_detected=self.scam_detected,
+            current_stage=self.scam_stage.value,
+            risk_score=self.risk_score,
+            reply_language=self.locked_language or "hindi",
+            is_stalled=self.check_stall(),
+            should_terminate=self.should_gracefully_terminate()
+        )
+        
+        logger.info(f"🧠 AgentMemory built: turn={memory.turn_count}, stage={memory.current_stage}, asked={memory.questions_already_asked}")
+        return memory
     
     def add_risk(self, score: int, reason: str = ""):
         """

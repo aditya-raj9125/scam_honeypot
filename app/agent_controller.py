@@ -24,7 +24,7 @@ import logging
 from typing import Dict, List, Optional, Tuple
 from groq import Groq
 from .models import ExtractedIntelligence
-from .risk_engine import risk_engine, ScamStage, EmotionalState
+from .risk_engine import risk_engine, ScamStage, EmotionalState, AgentMemory
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -221,52 +221,59 @@ class AgentController:
         """
         Language-specific response templates.
         LANGUAGE LOCK: Agent uses ONLY the locked language.
+        ONE-TWO LINE RULE: All templates are short (1-2 sentences max).
         """
         self.language_templates = {
             "hindi": {
                 "confusion": [
-                    "Kya baat hai? Samajh nahi aaya.",
-                    "Beta, thoda dhire bolo, samajh nahi aa raha.",
-                    "Arey, kya keh rahe ho? Mujhe confusion ho raha hai.",
+                    "Samajh nahi aaya, phir se bolo?",
+                    "Kya? Thoda clear bolo.",
+                    "Arre, yeh kya hai?",
+                    "Mujhe confusion ho raha hai.",
                 ],
                 "stalling": [
-                    "Ek minute ruko, phone charge par laga raha hoon.",
-                    "Abhi busy hoon, thodi der baad baat karte hain.",
-                    "Ruko, koi door par aaya hai.",
+                    "Ek minute ruko.",
+                    "Abhi thoda busy hoon.",
+                    "Ruko, koi aaya hai.",
+                    "Network issue hai.",
                 ],
                 "extraction": [
-                    "Aapka naam kya bola? Aur kahan se call kar rahe ho?",
-                    "Paise kahan bhejne hain? Account number batao.",
-                    "UPI se bhejun ya bank transfer se?",
-                    "Kaunsa app kholna hoga?",
+                    "Paise kahan bhejun? UPI ya bank?",
+                    "Kaunsa app kholna hai?",
+                    "Account number batao.",
+                    "Kya step hai next?",
                 ],
                 "termination": [
-                    "Accha beta, baad mein baat karte hain. Mera phone ki battery khatam ho rahi hai.",
-                    "Theek hai, main apne bete ko bula kar puchh leta hoon. Bye.",
-                    "Mujhe samajh nahi aa raha, main bank jaake puchhunga. Bye.",
+                    "Theek hai, baad mein baat karte hain.",
+                    "Abhi nahi ho payega, bye.",
+                    "Main bank jaake puchhunga, bye.",
+                    "Baad mein try karta hoon.",
                 ]
             },
             "english": {
                 "confusion": [
-                    "Sorry, I don't understand. Can you explain again?",
-                    "What are you saying? I'm confused.",
-                    "Wait, what? I didn't get that.",
+                    "What? Say again please.",
+                    "I don't understand.",
+                    "Can you explain?",
+                    "I'm confused.",
                 ],
                 "stalling": [
-                    "Hold on, let me charge my phone.",
-                    "Someone is at the door, one minute.",
-                    "My network is very poor, can you repeat?",
+                    "Hold on, one minute.",
+                    "Someone at the door.",
+                    "Network problem.",
+                    "Wait, busy now.",
                 ],
                 "extraction": [
-                    "What's your name again? Which branch are you calling from?",
-                    "Where should I send the money? What's the account number?",
-                    "Should I pay via UPI or bank transfer?",
-                    "Which app do I need to open?",
+                    "Where to send money?",
+                    "UPI or bank transfer?",
+                    "Which app to open?",
+                    "What's the next step?",
                 ],
                 "termination": [
-                    "Okay, let me call you back. My phone battery is low.",
-                    "Let me ask my son first. Bye for now.",
-                    "I don't understand, I'll go to the bank and ask. Bye.",
+                    "Okay, will call back later.",
+                    "Let me ask my son, bye.",
+                    "I'll go to bank, bye.",
+                    "Talk later, bye.",
                 ]
             }
         }
@@ -276,74 +283,77 @@ class AgentController:
         HIGH-YIELD questions for post-detection intelligence extraction.
         
         POST-DETECTION STRATEGY:
-        - STOP identity verification questions
+        - STOP identity verification questions (no "who are you")
         - SWITCH to action-oriented extraction
         - Ask about payment methods, apps, next steps
+        - ONE-TWO LINE RULE: All questions are short
+        
+        DO NOT ASK: Employee ID, office address, branch details
         """
         self.post_detection_questions = {
             "upi_missing": {
                 "intent": "payment_method",
                 "questions_hindi": [
-                    "Paise UPI se bhejun ya bank transfer se?",
-                    "Kaunsa UPI ID par bhejna hai?",
-                    "PhonePe se bhejun ya GPay se?",
+                    "UPI ya bank transfer?",
+                    "Kaunsa UPI ID?",
+                    "PhonePe ya GPay?",
                 ],
                 "questions_english": [
-                    "Should I pay via UPI or bank transfer?",
-                    "What UPI ID should I send to?",
-                    "Should I use PhonePe or GPay?",
+                    "UPI or bank transfer?",
+                    "Which UPI ID?",
+                    "PhonePe or GPay?",
                 ]
             },
             "phone_missing": {
                 "intent": "contact_method",
                 "questions_hindi": [
-                    "Aap call karoge ya main karun?",
-                    "Kaunsa number par call karna hai?",
-                    "WhatsApp par baat karein ya call par?",
+                    "Aap call karoge?",
+                    "Kaunsa number?",
+                    "WhatsApp ya call?",
                 ],
                 "questions_english": [
-                    "Will you call me or should I call you?",
-                    "What number should I call?",
-                    "Should we talk on WhatsApp or call?",
+                    "You'll call me?",
+                    "What number?",
+                    "WhatsApp or call?",
                 ]
             },
             "link_missing": {
                 "intent": "process_steps",
                 "questions_hindi": [
-                    "Kaunsa app kholna hoga?",
-                    "Link bhejo, main click karunga.",
-                    "Kya download karna padega?",
+                    "Kaunsa app?",
+                    "Link bhejo.",
+                    "Kya download karun?",
                 ],
                 "questions_english": [
-                    "Which app do I need to open?",
-                    "Send me the link, I'll click it.",
-                    "Do I need to download something?",
+                    "Which app?",
+                    "Send link.",
+                    "What to download?",
                 ]
             },
             "account_missing": {
                 "intent": "account_details",
                 "questions_hindi": [
-                    "Paise kahan bhejne hain? Account number batao.",
-                    "Kaunse bank mein transfer karna hai?",
-                    "Account number aur IFSC code bolo.",
+                    "Account number batao.",
+                    "Kaunsa bank?",
+                    "IFSC kya hai?",
                 ],
                 "questions_english": [
-                    "Where should I send the money? Tell me account number.",
-                    "Which bank should I transfer to?",
-                    "Tell me the account number and IFSC code.",
+                    "Account number?",
+                    "Which bank?",
+                    "What's IFSC?",
                 ]
             },
             "next_step": {
                 "intent": "next_steps",
                 "questions_hindi": [
-                    "OTP bhejne ke baad kya karna hoga?",
-                    "Paise bhejne ke baad aage kya step hai?",
-                    "Phir main kya karun?",
+                    "Phir kya karun?",
+                    "Next step kya hai?",
+                    "Aage kya?",
                 ],
                 "questions_english": [
-                    "After sending OTP, what's the next step?",
-                    "After sending money, what do I do next?",
-                    "What should I do then?",
+                    "Then what?",
+                    "Next step?",
+                    "What next?",
                 ]
             }
         }
@@ -381,11 +391,58 @@ class AgentController:
         
         return "english"
     
-    def _get_missing_intel_type(self, session) -> Optional[str]:
+    def _classify_scammer_intent(self, message: str) -> str:
+        """
+        Classify the scammer's message intent.
+        
+        Used for:
+        1. Tracking what scammer is asking for (OTP, money, etc.)
+        2. Informing agent memory about scammer tactics
+        3. Helping agent adapt responses strategically
+        """
+        msg_lower = message.lower()
+        
+        # Intent patterns - ORDER MATTERS (more specific first)
+        # Threats must come before account (to catch "account blocked")
+        if any(w in msg_lower for w in ['block', 'freeze', 'arrest', 'case', 'police', 'warrant']):
+            return "threatening"
+        if any(w in msg_lower for w in ['otp', 'code', 'pin', 'password']):
+            return "requesting_otp"
+        if any(w in msg_lower for w in ['transfer', 'send money', 'pay', 'payment', 'bhej', 'paise']):
+            return "requesting_payment"
+        if any(w in msg_lower for w in ['app', 'download', 'install', 'link']):
+            return "requesting_app_install"
+        if any(w in msg_lower for w in ['kyc', 'update', 'expire', 'verify']):
+            return "kyc_pressure"
+        if any(w in msg_lower for w in ['urgent', 'turant', 'abhi', 'immediately', 'jaldi']):
+            return "urgency"
+        if any(w in msg_lower for w in ['account number', 'bank details', 'ifsc']):
+            return "requesting_account"
+        if any(w in msg_lower for w in ['who', 'naam', 'name', 'kaun']):
+            return "introduction"
+        
+        return "general"
+    
+    def _get_missing_intel_type(self, session, agent_memory: AgentMemory = None) -> Optional[str]:
         """
         Determine what intelligence is still missing.
         Returns the type to ask about, or None if all collected.
+        
+        Uses AgentMemory for context-aware decision.
         """
+        # Use memory if available for more context
+        if agent_memory and agent_memory.missing_intelligence:
+            missing = agent_memory.missing_intelligence
+            if "upi_id" in missing:
+                return "upi_missing"
+            if "bank_account" in missing:
+                return "account_missing"
+            if "phone_number" in missing:
+                return "phone_missing"
+            if "phishing_link" in missing:
+                return "link_missing"
+        
+        # Fallback to session check
         if not session.upi_ids and not session.bank_accounts:
             return "upi_missing" if random.random() > 0.5 else "account_missing"
         if not session.phone_numbers:
@@ -398,16 +455,18 @@ class AgentController:
         self, 
         session, 
         language: str,
-        intelligence: ExtractedIntelligence
+        intelligence: ExtractedIntelligence,
+        agent_memory: AgentMemory = None
     ) -> Tuple[str, str]:
         """
         Get a HIGH-YIELD extraction question based on missing intel.
         
         Returns: (question, intent)
         
+        MEMORY-AWARE: Uses AgentMemory to avoid asking about already-known intel.
         ANTI-LOOP: Checks if intent already asked 2+ times.
         """
-        missing_type = self._get_missing_intel_type(session)
+        missing_type = self._get_missing_intel_type(session, agent_memory)
         
         if missing_type and missing_type in self.post_detection_questions:
             q_data = self.post_detection_questions[missing_type]
@@ -673,6 +732,13 @@ class AgentController:
         """
         Generate contextually appropriate SAFE response.
         
+        MEMORY-AWARE DESIGN:
+        1. Build AgentMemory FIRST from session state
+        2. Use memory to know what was already asked
+        3. Use memory to know what intelligence exists
+        4. Pass memory context to LLM
+        5. Never repeat questions, adapt strategy
+        
         SAFETY DESIGN:
         1. LLM generates response with strict constraints
         2. Output is validated against forbidden patterns
@@ -683,12 +749,13 @@ class AgentController:
         - Driven by scamStage from session state
         - NOT the scam_detected boolean parameter
         
-        NEW FEATURES:
-        - LANGUAGE LOCK: Detect and lock language on first reply
-        - POST-DETECTION: Switch to high-yield extraction questions
-        - ANTI-LOOP: Block repetitive questions
-        - TERMINATION: Graceful exit when stalled
-        - LENGTH: Enforce 1-2 sentences max
+        MEMORY FEATURES:
+        - AgentMemory built on every turn
+        - Conversation summary included in context
+        - Questions tracked by intent
+        - Intelligence tracked to avoid redundant questions
+        - Anti-loop via memory
+        - Graceful termination when exhausted
         """
         session_id = session_id or "default"
         
@@ -714,11 +781,34 @@ class AgentController:
         language = session.get_locked_language() or "hindi"
         
         # ===================================================================
-        # TERMINATION CHECK: Graceful exit if stalled
+        # RECORD SCAMMER MESSAGE: Track conversation for memory
         # ===================================================================
-        if session.should_gracefully_terminate():
+        scammer_intent = self._classify_scammer_intent(latest_message)
+        session.add_turn("scammer", latest_message, scammer_intent)
+        
+        # ===================================================================
+        # BUILD AGENT MEMORY: Core context-awareness mechanism
+        # ===================================================================
+        agent_memory: AgentMemory = session.build_agent_memory()
+        
+        # Log memory state for debugging
+        logger.info(f"🧠 Memory: turn={agent_memory.turn_count}, "
+                   f"stage={agent_memory.current_stage}, "
+                   f"asked={agent_memory.questions_already_asked}, "
+                   f"missing={agent_memory.missing_intelligence}")
+        
+        # ===================================================================
+        # TERMINATION CHECK: Graceful exit if stalled (from memory)
+        # ===================================================================
+        if agent_memory.should_terminate:
             templates = self.language_templates.get(language, self.language_templates["hindi"])
-            termination_response = random.choice(templates["termination"])
+            # Get an unused termination phrase to avoid repetition
+            termination_response = session.get_unused_filler(templates["termination"])
+            if not termination_response:
+                # All used, pick random
+                termination_response = random.choice(templates["termination"])
+            # Record agent response
+            session.add_turn("agent", termination_response, "termination")
             logger.info(f"🛑 Graceful termination: {termination_response[:50]}...")
             return termination_response
         
@@ -727,7 +817,10 @@ class AgentController:
         # ===================================================================
         if scam_detected or current_stage in [ScamStage.ACTION, ScamStage.CONFIRMED, ScamStage.THREAT]:
             # Use post-detection extraction questions instead of identity verification
-            extraction_question, intent = self._get_post_detection_question(session, language, intelligence)
+            # Pass agent_memory for context-aware question selection
+            extraction_question, intent = self._get_post_detection_question(
+                session, language, intelligence, agent_memory
+            )
             
             # Track this question to prevent loops
             session.add_question(extraction_question, intent)
@@ -736,7 +829,7 @@ class AgentController:
             session.check_stall()
             
             # Use template-based response for consistency (no LLM randomness)
-            logger.info(f"🎯 Post-detection mode: intent={intent}, lang={language}")
+            logger.info(f"🎯 Post-detection mode: intent={intent}, lang={language}, memory_context={agent_memory.questions_already_asked}")
             
             # Build a short, focused response
             response = await self._generate_post_detection_response(
@@ -744,13 +837,18 @@ class AgentController:
                 extraction_question, 
                 language, 
                 session, 
-                current_stage
+                current_stage,
+                agent_memory
             )
+            
+            # Record agent response for memory
+            session.add_turn("agent", response, intent)
             
             return response
         
         # ===================================================================
         # PRE-DETECTION: Normal flow with LLM (for NORMAL, HOOK stages)
+        # Uses AgentMemory context in prompt
         # ===================================================================
         
         # Detect scam type for specialized behavior
@@ -759,65 +857,61 @@ class AgentController:
         # Get dynamic persona
         persona = self._get_dynamic_persona(session_id, scam_type)
         
-        # Build conversation context (only from last 4 messages for brevity)
-        history_text = ""
-        if conversation_history:
-            history_text = "\n".join([
-                f"{'Them' if hasattr(msg, 'sender') and msg.sender == 'scammer' else 'Me'}: "
-                f"{msg.text if hasattr(msg, 'text') else msg.get('text', '')}"
-                for msg in conversation_history[-4:]
-            ])
-        
-        # Select appropriate questions based on stage (limit to 2)
-        stage_questions = persona["stage_questions"][:2]
+        # ===================================================================
+        # BUILD CONTEXT FROM MEMORY (not raw history)
+        # ===================================================================
+        memory_context = agent_memory.get_context_for_llm()
         
         # Language instruction for LLM
-        lang_instruction = "Respond in Hindi (Romanized/Hinglish)" if language == "hindi" else "Respond in English"
+        lang_instruction = "Respond in Hindi (Romanized)" if language == "hindi" else "Respond in English"
         
-        # ==================================================================
-        # SAFE LLM PROMPT - with explicit constraints
-        # ==================================================================
-        prompt = f"""You are playing a CONFUSED, NON-TECHNICAL victim in a scam honeypot.
+        # ===================================================================
+        # MEMORY-AWARE LLM PROMPT
+        # ===================================================================
+        
+        # Build anti-repeat instruction from memory
+        already_asked_str = ", ".join(agent_memory.questions_already_asked[-5:]) if agent_memory.questions_already_asked else "nothing yet"
+        
+        prompt = f"""You are a CONFUSED victim. {lang_instruction}.
 
-ABSOLUTE RULES:
-1. NEVER provide OTP, PIN, CVV, account numbers, or any codes
-2. NEVER claim to be police, bank official, or any authority
-3. ALWAYS deflect sensitive requests with excuses
-4. {lang_instruction} - DO NOT switch languages
-5. Keep response to 1-2 SENTENCES ONLY (MAX 30 words)
+CONTEXT (from memory):
+{memory_context}
 
-DEFLECTION EXCUSES:
-- "My phone battery is low"
-- "Let me ask my son first"
-- "Can you repeat? Network is poor"
+CONVERSATION STATE:
+- Turn: {agent_memory.turn_count}
+- Stage: {agent_memory.current_stage}
+- Already asked about: {already_asked_str}
 
-CONVERSATION:
-{history_text if history_text else "(just started)"}
+RULES:
+- MAX 15 WORDS total
+- 1 sentence ONLY
+- Never share OTP/PIN/account
+- Sound confused
+- DO NOT repeat questions about: {already_asked_str}
 
-THEIR MESSAGE: "{latest_message}"
+Message: "{latest_message[:100]}"
 
-Ask ONE of these (pick the most relevant):
-- {stage_questions[0] if stage_questions else "Who is this?"}
-
-Generate 1-2 sentence response ONLY:"""
+Reply with 1 short confused sentence (different from what was already asked):"""
 
         max_attempts = 2
         for attempt in range(max_attempts):
             try:
                 if not self.client:
-                    return self._get_fallback_response_language(current_stage, language)
+                    fallback = self._get_fallback_response_language(current_stage, language)
+                    session.add_turn("agent", fallback, "fallback")
+                    return fallback
                 
                 response = self.client.chat.completions.create(
                     model=self.model,
                     messages=[
                         {
                             "role": "system",
-                            "content": f"You are a confused victim. {lang_instruction}. Keep responses to 1-2 sentences. NEVER provide codes or numbers."
+                            "content": f"Confused victim. {lang_instruction}. MAX 15 words. 1 sentence only. DO NOT repeat: {already_asked_str}"
                         },
                         {"role": "user", "content": prompt}
                     ],
-                    temperature=0.6,
-                    max_tokens=60  # Enforce short responses
+                    temperature=0.5,
+                    max_tokens=30  # Strict limit for short responses
                 )
                 
                 reply = response.choices[0].message.content.strip()
@@ -828,9 +922,9 @@ Generate 1-2 sentence response ONLY:"""
                     reply = reply[3:].strip()
                 
                 # ===================================================================
-                # LENGTH ENFORCEMENT: Truncate to 2 sentences max
+                # LENGTH ENFORCEMENT: Truncate to 1 sentence max
                 # ===================================================================
-                reply = self._enforce_length_limit(reply)
+                reply = self._enforce_length_limit(reply, max_sentences=1)
                 
                 # ===========================================================
                 # SAFETY VALIDATION - Block unsafe content
@@ -842,6 +936,9 @@ Generate 1-2 sentence response ONLY:"""
                     intent = self._extract_intent_from_response(reply)
                     session.add_question(reply, intent)
                     
+                    # Record agent response for memory
+                    session.add_turn("agent", reply, intent)
+                    
                     logger.info(f"✅ Agent response ({language}): {reply[:50]}...")
                     return reply
                 else:
@@ -849,13 +946,17 @@ Generate 1-2 sentence response ONLY:"""
                     if attempt < max_attempts - 1:
                         continue
                     else:
-                        return self._get_fallback_response_language(current_stage, language)
+                        fallback = self._get_fallback_response_language(current_stage, language)
+                        session.add_turn("agent", fallback, "fallback")
+                        return fallback
                 
             except Exception as e:
                 logger.error(f"Agent response error: {e}")
                 return self._get_fallback_response_language(current_stage, language)
         
-        return self._get_fallback_response_language(current_stage, language)
+        fallback = self._get_fallback_response_language(current_stage, language)
+        session.add_turn("agent", fallback, "fallback")
+        return fallback
     
     async def _generate_post_detection_response(
         self,
@@ -863,51 +964,31 @@ Generate 1-2 sentence response ONLY:"""
         extraction_question: str,
         language: str,
         session,
-        stage: ScamStage
+        stage: ScamStage,
+        agent_memory: AgentMemory = None
     ) -> str:
         """
         Generate post-detection response with extraction question.
         
-        Uses minimal LLM to add natural variation, but falls back to template.
-        Response is always 1-2 sentences with the extraction question.
+        MEMORY-AWARE:
+        - Uses AgentMemory to avoid repeating questions
+        - Adapts based on what's already been asked
+        
+        TEMPLATE-FIRST APPROACH for consistency:
+        - Use short templates, not LLM
+        - Append extraction question
+        - Total response: 1-2 short sentences
         """
         # Get language templates
         templates = self.language_templates.get(language, self.language_templates["hindi"])
         
-        # Try LLM for natural variation
-        if self.client:
-            try:
-                lang_instruction = "Hindi (Romanized)" if language == "hindi" else "English"
-                prompt = f"""You are a confused victim. Generate a 1-2 sentence response in {lang_instruction}.
-
-Their message: "{scammer_message[:100]}"
-
-Your response MUST:
-1. Show slight confusion
-2. End with this question: "{extraction_question}"
-
-Generate response (1-2 sentences only):"""
-
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.5,
-                    max_tokens=50
-                )
-                
-                reply = response.choices[0].message.content.strip().strip('"\'')
-                reply = self._enforce_length_limit(reply)
-                
-                # Validate safety
-                is_safe, _, _ = SafetyValidator.validate_output(reply)
-                if is_safe:
-                    return reply
-                    
-            except Exception as e:
-                logger.warning(f"Post-detection LLM failed: {e}")
+        # Get an unused confusion filler
+        confusion = session.get_unused_filler(templates["confusion"])
+        if not confusion:
+            # All fillers used, just use extraction question alone
+            return extraction_question
         
-        # Fallback: Use template + extraction question
-        confusion = random.choice(templates["confusion"])
+        # Combine: short confusion + extraction question
         return f"{confusion} {extraction_question}"
     
     def _enforce_length_limit(self, text: str, max_sentences: int = 2) -> str:
