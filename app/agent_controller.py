@@ -1,146 +1,255 @@
 """
-AGENT CONTROLLER - Autonomous agentic AI for scammer engagement
-State-aware, intelligence-focused engagement system
+AGENT CONTROLLER - Stage-based agentic behavior with dynamic persona
+REFACTORED to fix Problems #5, #6, #7
+
+KEY CHANGES:
+- Agent behavior depends on scamStage, NOT scamDetected boolean (Problem #5)
+- Agent can operate meaningfully in SUSPICIOUS/HOOK stages (Problem #6)
+- Persona is dynamic with emotional drift (Problem #7)
+- Never reveals detection, never provides real OTP/payment
+- Strategic intelligence extraction
 """
 
 import os
 import json
 import random
+from typing import Dict, List, Optional
 from groq import Groq
 from .models import ExtractedIntelligence
-from .state_machine import state_machine, ConversationState
+from .risk_engine import risk_engine, ScamStage, EmotionalState
+
 
 class AgentController:
     """
     Autonomous AI agent for honeypot engagement.
-    Behavior adapts based on conversation state and detection confidence.
+    
+    KEY DESIGN (Problem #5, #6, #7):
+    - Behavior driven by scamStage, NOT scamDetected
+    - Can operate meaningfully at ALL stages
+    - Persona drifts emotionally through conversation
+    - Strategic extraction based on stage
     """
     
     def __init__(self):
         api_key = os.getenv("GROQ_API_KEY")
-        self.client = Groq(api_key=api_key)
+        self.client = Groq(api_key=api_key) if api_key else None
         self.model = "llama-3.1-8b-instant"
         
-        # Response templates for quick fallbacks
+        self._init_stage_behaviors()
+        self._init_scam_type_behaviors()
         self._init_response_templates()
     
+    def _init_stage_behaviors(self):
+        """
+        Stage-based behavior profiles (Problem #5, #6).
+        Agent behavior is determined by scamStage, NOT scamDetected.
+        """
+        self.stage_behaviors = {
+            ScamStage.NORMAL: {
+                "persona": "curious user, slightly confused",
+                "strategy": "seek clarification, understand context",
+                "tone": "polite, questioning",
+                "info_sharing": "none",
+                "questions": [
+                    "I'm sorry, who is this exactly?",
+                    "I don't understand what you're referring to.",
+                    "Could you explain what this is about?",
+                ]
+            },
+            ScamStage.HOOK: {
+                "persona": "confused but engaged citizen",
+                "strategy": "probe for details, seem interested but uncertain",
+                "tone": "confused, slightly worried",
+                "info_sharing": "minimal - only clarifying questions",
+                "questions": [
+                    "Wait, what bank are you calling from exactly?",
+                    "I don't recall any such issue. Can you explain?",
+                    "How did you get my number?",
+                    "Is this really from the bank? How can I verify?",
+                ]
+            },
+            ScamStage.TRUST: {
+                "persona": "cautious person seeking verification",
+                "strategy": "ask for proof, delay while gathering info",
+                "tone": "wary but willing to listen",
+                "info_sharing": "minimal - asking for their details",
+                "questions": [
+                    "Can you give me a reference number for this?",
+                    "What is your employee ID?",
+                    "Can I call back on the official number to verify?",
+                    "Why wasn't I notified earlier about this?",
+                ]
+            },
+            ScamStage.THREAT: {
+                "persona": "worried victim, showing fear",
+                "strategy": "express concern, ask about consequences while stalling",
+                "tone": "anxious, seeking reassurance",
+                "info_sharing": "gradual - fake hesitation",
+                "questions": [
+                    "Oh no, will I really lose my money?",
+                    "Please don't block my account! What should I do?",
+                    "This is very stressful. How can I fix this quickly?",
+                    "What happens if I don't do this right now?",
+                ]
+            },
+            ScamStage.ACTION: {
+                "persona": "scared but cooperative victim",
+                "strategy": "seem ready to comply but ask for details, extract intel",
+                "tone": "panicked, compliant",
+                "info_sharing": "strategic fake data, extract their details",
+                "questions": [
+                    "Okay, where should I transfer the money?",
+                    "What UPI ID should I use for the refund?",
+                    "I'm ready to pay. What's the account number?",
+                    "Let me just write down the details. What's the link again?",
+                ]
+            },
+            ScamStage.CONFIRMED: {
+                "persona": "fully compliant victim",
+                "strategy": "maximum intelligence gathering with fake compliance",
+                "tone": "eager to resolve, fully trusting",
+                "info_sharing": "fake credentials, extract all details",
+                "questions": [
+                    "I'm doing it now. Just tell me exactly where to send.",
+                    "The OTP is... wait, let me check. What's your UPI again?",
+                    "I want to help you help me. What other details do you need?",
+                    "Before I proceed, can you confirm the account one more time?",
+                ]
+            },
+        }
+    
+    def _init_scam_type_behaviors(self):
+        """Initialize scam-type-specific behavior enhancements"""
+        self.scam_type_behaviors = {
+            "bank_kyc": {
+                "emotion_drift": ["confused", "worried", "panicked"],
+                "persona_detail": "elderly person unfamiliar with banking apps",
+                "extraction_focus": ["branch name", "employee ID", "reference number"],
+            },
+            "otp_fraud": {
+                "emotion_drift": ["confused", "trusting", "compliant"],
+                "persona_detail": "busy professional distracted at work",
+                "extraction_focus": ["reason for OTP", "what service", "caller identity"],
+            },
+            "police_impersonation": {
+                "emotion_drift": ["shocked", "terrified", "desperate"],
+                "persona_detail": "law-abiding citizen scared of legal trouble",
+                "extraction_focus": ["case number", "FIR details", "officer name", "station"],
+            },
+            "job_scam": {
+                "emotion_drift": ["excited", "hopeful", "eager"],
+                "persona_detail": "unemployed person seeking work",
+                "extraction_focus": ["company name", "job details", "contact person"],
+            },
+            "loan_scam": {
+                "emotion_drift": ["relieved", "eager", "compliant"],
+                "persona_detail": "person in financial difficulty",
+                "extraction_focus": ["loan terms", "bank name", "processing account"],
+            },
+            "refund_scam": {
+                "emotion_drift": ["surprised", "happy", "cooperative"],
+                "persona_detail": "budget-conscious online shopper",
+                "extraction_focus": ["order details", "refund amount", "payment method"],
+            },
+            "utility_scam": {
+                "emotion_drift": ["panicked", "urgent", "compliant"],
+                "persona_detail": "householder worried about service",
+                "extraction_focus": ["consumer number", "payment account", "amount"],
+            },
+        }
+    
     def _init_response_templates(self):
-        """Initialize response templates for different scenarios"""
-        
+        """Initialize response templates for quick fallbacks"""
         self.templates = {
-            # Initial confusion responses
-            "initial_confusion": [
-                "Wait, what's going on with my account? Is this really from the bank?",
-                "I don't understand. What do you mean my account is compromised?",
-                "Hold on, this is very sudden. Can you explain what's happening?",
-                "What? My account will be blocked? Why would that happen?",
-                "I'm confused. I haven't done anything wrong with my account.",
+            "confusion": [
+                "Wait, what? I don't understand what's happening.",
+                "Sorry, can you explain that again? I'm confused.",
+                "I'm not following. What exactly do you need?",
             ],
-            
-            # Seeking clarification
-            "clarification": [
-                "But how do I know this is really from the bank? Can you verify?",
-                "Which account are you talking about exactly?",
-                "What suspicious activity did you detect? I need more details.",
-                "Can you tell me when this happened? I don't recall anything unusual.",
-                "Why wasn't I notified earlier about this issue?",
+            "concern": [
+                "This is really worrying. What should I do?",
+                "Oh no, I didn't know about this. Is it serious?",
+                "This sounds bad. How can I fix this?",
             ],
-            
-            # Showing concern
-            "concerned": [
-                "Oh no, this is very worrying. What should I do now?",
-                "I'm really scared about this. Will I lose all my money?",
-                "This is so stressful. Can you help me fix this quickly?",
-                "I can't afford to lose my account. Please tell me what to do.",
-                "My savings are in that account. Please help me protect them.",
+            "compliance": [
+                "Okay, I'll do whatever you say. Just help me.",
+                "Yes, I'm ready. Tell me what to do.",
+                "I trust you. Just guide me through this.",
             ],
-            
-            # Hesitant compliance (for intelligence gathering)
-            "hesitant_compliance": [
-                "I'm not sure if I should share that. Is it really necessary?",
-                "Okay, but promise me this is secure. Let me check...",
-                "I'm a bit nervous about this, but if it's the only way...",
-                "Can I trust you with this information? This seems unusual.",
-                "Alright, give me a moment to find that information.",
-            ],
-            
-            # Stalling tactics
             "stalling": [
-                "Hold on, I need to think about this for a moment.",
-                "Can you give me a minute? I want to understand this properly.",
-                "Wait, let me write this down. What did you say again?",
-                "I'm at work right now. Can you explain more slowly?",
-                "My phone is about to die. Can you repeat the important parts?",
+                "Hold on, let me find my phone.",
+                "Wait, I'm looking for that information.",
+                "One minute, I'm not near my computer right now.",
             ],
-            
-            # Extracting information
-            "extraction_questions": [
-                "Where should I transfer the money to secure it?",
-                "What number should I call to verify this is real?",
-                "Where can I download the app you mentioned?",
-                "What's the UPI ID I should use for the verification?",
-                "Can you give me a reference number for this case?",
+            "extraction": [
+                "Before I do that, what's the account number again?",
+                "Let me write this down. What was the UPI ID?",
+                "I want to make sure I have the right details.",
             ],
         }
     
-    def _get_behavior_profile(self, session_id: str, scam_detected: bool) -> dict:
-        """Get current behavior profile based on state"""
+    def _detect_scam_type(self, message: str, history: list) -> str:
+        """Detect the type of scam based on message content"""
+        message_lower = message.lower()
+        all_text = message_lower
         
-        state = state_machine.get_current_state(session_id)
-        state_info = state_machine.get_state_info(session_id)
-        turn_count = state_info.get("turn_count", 0)
+        for msg in history[-5:]:
+            text = msg.text if hasattr(msg, 'text') else msg.get('text', '')
+            all_text += " " + text.lower()
         
-        profiles = {
-            ConversationState.INIT: {
-                "persona": "confused innocent user",
-                "strategy": "seek clarification",
-                "template_categories": ["initial_confusion", "clarification"],
-                "info_sharing": "none",
-                "tone": "confused but polite"
-            },
-            ConversationState.MONITORING: {
-                "persona": "cautious user",
-                "strategy": "gather information",
-                "template_categories": ["clarification", "concerned"],
-                "info_sharing": "minimal",
-                "tone": "wary but engaged"
-            },
-            ConversationState.SUSPICIOUS: {
-                "persona": "worried user",
-                "strategy": "probe for details",
-                "template_categories": ["concerned", "clarification"],
-                "info_sharing": "minimal",
-                "tone": "anxious and questioning"
-            },
-            ConversationState.SCAM_CONFIRMED: {
-                "persona": "naive victim",
-                "strategy": "build trust, extract info",
-                "template_categories": ["concerned", "hesitant_compliance"],
-                "info_sharing": "gradual",
-                "tone": "scared but cooperative"
-            },
-            ConversationState.AGENT_ACTIVE: {
-                "persona": "trusting victim",
-                "strategy": "active intelligence gathering",
-                "template_categories": ["hesitant_compliance", "extraction_questions"],
-                "info_sharing": "strategic fake data",
-                "tone": "cooperative and trusting"
-            },
-            ConversationState.INTELLIGENCE_GATHERING: {
-                "persona": "compliant victim",
-                "strategy": "maximum extraction",
-                "template_categories": ["extraction_questions", "hesitant_compliance"],
-                "info_sharing": "fake data freely",
-                "tone": "eager to help"
-            },
+        scam_indicators = {
+            "bank_kyc": ["kyc", "account block", "bank", "verify details", "update kyc"],
+            "otp_fraud": ["otp", "verification code", "share otp", "enter code"],
+            "police_impersonation": ["police", "cyber cell", "arrest", "warrant", "case", "cbi", "ed"],
+            "job_scam": ["work from home", "part time", "data entry", "typing job", "earn money"],
+            "loan_scam": ["loan approved", "pre-approved", "instant loan", "processing fee"],
+            "refund_scam": ["refund", "cashback", "excess payment", "return payment"],
+            "utility_scam": ["electricity", "gas", "disconnection", "bill overdue", "power cut"],
         }
         
-        profile = profiles.get(state, profiles[ConversationState.INIT])
-        profile["state"] = state.name
-        profile["turn_count"] = turn_count
+        scores = {}
+        for scam_type, indicators in scam_indicators.items():
+            score = sum(1 for ind in indicators if ind in all_text)
+            if score > 0:
+                scores[scam_type] = score
         
-        return profile
-
+        return max(scores, key=scores.get) if scores else "bank_kyc"
+    
+    def _get_dynamic_persona(
+        self, 
+        session_id: str,
+        scam_type: str
+    ) -> Dict:
+        """Get dynamic persona based on current emotional state"""
+        session = risk_engine.get_or_create_session(session_id)
+        persona_state = session.persona_state
+        current_stage = session.scam_stage
+        
+        # Get base behavior from stage
+        stage_behavior = self.stage_behaviors.get(
+            current_stage, 
+            self.stage_behaviors[ScamStage.NORMAL]
+        )
+        
+        # Get scam-type specific enhancements
+        type_behavior = self.scam_type_behaviors.get(scam_type, {})
+        
+        # Build dynamic persona
+        persona = {
+            "base": stage_behavior["persona"],
+            "detail": type_behavior.get("persona_detail", ""),
+            "emotion": persona_state.current_emotion.value,
+            "compliance_level": persona_state.compliance_level,
+            "trust_level": persona_state.trust_level,
+            "strategy": stage_behavior["strategy"],
+            "tone": stage_behavior["tone"],
+            "info_sharing": stage_behavior["info_sharing"],
+            "stage_questions": stage_behavior["questions"],
+            "extraction_focus": type_behavior.get("extraction_focus", []),
+        }
+        
+        return persona
+    
     async def generate_response(
         self, 
         latest_message: str, 
@@ -151,70 +260,89 @@ class AgentController:
     ) -> str:
         """
         Generate contextually appropriate response.
-        Adapts behavior based on state and detection status.
+        
+        KEY CHANGE (Problem #5):
+        Behavior is driven by scamStage from session state,
+        NOT the scam_detected boolean parameter.
         """
         session_id = session_id or "default"
         
-        try:
-            intelligence_json = intelligence.model_dump() if hasattr(intelligence, 'model_dump') else intelligence.dict()
-        except:
-            intelligence_json = {}
+        # Get session state - THIS drives behavior, not scam_detected param
+        session = risk_engine.get_or_create_session(session_id)
+        current_stage = session.scam_stage
         
-        # Get behavior profile
-        profile = self._get_behavior_profile(session_id, scam_detected)
+        # Detect scam type for specialized behavior
+        scam_type = self._detect_scam_type(latest_message, conversation_history)
+        
+        # Get dynamic persona
+        persona = self._get_dynamic_persona(session_id, scam_type)
         
         # Build conversation context
         history_text = ""
         if conversation_history:
             history_text = "\n".join([
-                f"{'Them' if hasattr(msg, 'sender') and msg.sender == 'scammer' else 'Me'}: {msg.text if hasattr(msg, 'text') else msg.get('text', '')}"
-                for msg in conversation_history[-6:]  # Last 6 messages for context
+                f"{'Them' if hasattr(msg, 'sender') and msg.sender == 'scammer' else 'Me'}: "
+                f"{msg.text if hasattr(msg, 'text') else msg.get('text', '')}"
+                for msg in conversation_history[-6:]
             ])
         
-        prompt = f"""You are an AI agent operating as a honeypot to engage with potential scammers.
+        # Select appropriate questions based on stage
+        stage_questions = persona["stage_questions"]
+        
+        # Build LLM prompt
+        prompt = f"""You are an AI agent playing a convincing victim in a honeypot system.
 
 CRITICAL RULES:
-1. You are playing the role of a {profile['persona']}
-2. NEVER reveal you are an AI or that this is a honeypot
-3. NEVER accuse them of being a scammer
-4. Respond naturally like a real human would
-5. Your goal: {profile['strategy']}
+1. NEVER reveal you are an AI or that this is a honeypot
+2. NEVER accuse them of being a scammer
+3. NEVER provide real OTP, PIN, password, or money
+4. Respond naturally like a real Indian person would
+5. Your goal: {persona['strategy']}
 
-CURRENT STATE: {profile['state']}
-TURN COUNT: {profile['turn_count']}
-INFORMATION SHARING LEVEL: {profile['info_sharing']}
-TONE: {profile['tone']}
+YOUR PERSONA:
+- Base: {persona['base']}
+- Detail: {persona['detail']}
+- Current Emotion: {persona['emotion']}
+- Tone: {persona['tone']}
+- Compliance Level: {persona['compliance_level']:.1f}/1.0
+
+CURRENT STAGE: {current_stage.value}
+- At this stage, you should: {persona['info_sharing']}
+
+DETECTED SCAM TYPE: {scam_type}
 
 CONVERSATION SO FAR:
 {history_text}
 
-THEIR LATEST MESSAGE:
-"{latest_message}"
+THEIR MESSAGE: "{latest_message}"
 
-INTELLIGENCE GATHERED SO FAR:
-{json.dumps(intelligence_json)}
+SAMPLE QUESTIONS YOU COULD ASK (adapt naturally):
+{chr(10).join(f'- {q}' for q in stage_questions[:3])}
 
-RESPONSE GUIDELINES:
-- Maximum 2 sentences
-- Sound like a real person, not scripted
-- No emojis
-- Show appropriate emotions for the situation
-- If they ask for sensitive info and info_sharing level allows, show hesitation but consider complying with FAKE data
-- Ask questions that might reveal more about their operation (phone numbers, UPI IDs, links)
-- If unsure, ask for clarification or express concern
+EXTRACTION FOCUS (subtly ask about):
+{', '.join(persona['extraction_focus']) if persona['extraction_focus'] else 'General details'}
 
-Generate your response as plain text only:"""
-        
+Generate a response that:
+1. Matches your current emotional state ({persona['emotion']})
+2. Advances your strategy ({persona['strategy']})
+3. Tries to extract useful information without being obvious
+4. Sounds like a real human victim, not an AI
+
+Respond with ONLY the message text, no explanations."""
+
         try:
+            if not self.client:
+                return self._get_fallback_response(current_stage, persona)
+            
             response = self.client.chat.completions.create(
+                model=self.model,
                 messages=[
                     {
-                        "role": "system", 
-                        "content": "You are roleplaying as a potential scam victim. Stay in character. Never break character or reveal the honeypot nature."
+                        "role": "system",
+                        "content": "You are playing a victim in a scam conversation. Be convincing, emotional, and human-like. Never break character."
                     },
                     {"role": "user", "content": prompt}
                 ],
-                model=self.model,
                 temperature=0.7,
                 max_tokens=150
             )
@@ -222,81 +350,87 @@ Generate your response as plain text only:"""
             reply = response.choices[0].message.content.strip()
             
             # Clean up response
-            reply = reply.replace('"', '').replace("'", "'")
+            reply = reply.strip('"\'')
             if reply.startswith("Me:"):
                 reply = reply[3:].strip()
             
             return reply
             
         except Exception as e:
-            print(f"Error generating agent response: {e}")
-            # Use template fallback
-            return self._get_fallback_response(latest_message, profile)
+            print(f"Agent response error: {e}")
+            return self._get_fallback_response(current_stage, persona)
     
-    def _get_fallback_response(self, message: str, profile: dict) -> str:
-        """Get a template-based fallback response"""
-        message_lower = message.lower()
-        
-        # Select appropriate category based on message content
-        if any(word in message_lower for word in ["block", "suspend", "freeze", "terminate"]):
-            category = "concerned"
-        elif any(word in message_lower for word in ["otp", "pin", "password", "verify"]):
-            category = "hesitant_compliance"
-        elif any(word in message_lower for word in ["urgent", "immediate", "now"]):
-            category = "clarification"
-        elif any(word in message_lower for word in ["transfer", "send", "pay"]):
-            category = "extraction_questions"
+    def _get_fallback_response(self, stage: ScamStage, persona: Dict) -> str:
+        """Get fallback response when LLM fails"""
+        # Select template based on stage
+        if stage == ScamStage.NORMAL:
+            templates = self.templates["confusion"]
+        elif stage == ScamStage.HOOK:
+            templates = self.templates["confusion"] + self.templates["stalling"]
+        elif stage == ScamStage.TRUST:
+            templates = self.templates["concern"] + self.templates["stalling"]
+        elif stage == ScamStage.THREAT:
+            templates = self.templates["concern"]
+        elif stage in [ScamStage.ACTION, ScamStage.CONFIRMED]:
+            templates = self.templates["compliance"] + self.templates["extraction"]
         else:
-            categories = profile.get("template_categories", ["initial_confusion"])
-            category = random.choice(categories)
+            templates = self.templates["confusion"]
         
-        templates = self.templates.get(category, self.templates["initial_confusion"])
         return random.choice(templates)
-
-    async def check_mission_complete(self, intelligence: ExtractedIntelligence) -> bool:
-        # Check if we have meaningful intelligence
-        has_critical_intel = (
-            len(intelligence.bankAccounts) > 0 or 
-            len(intelligence.upiIds) > 0 or 
-            len(intelligence.phishingLinks) > 0 or 
-            len(intelligence.phoneNumbers) > 0
+    
+    async def check_mission_complete(
+        self, 
+        intelligence: ExtractedIntelligence,
+        session_id: str = None
+    ) -> bool:
+        """
+        Check if mission is complete (Problem #9).
+        
+        Mission complete if:
+        1. At least one high-value artifact extracted (UPI, bank, phone)
+        AND
+        2. Minimum turns reached (≥5)
+        OR
+        3. Scammer repeats payment demand (3+ times)
+        """
+        session_id = session_id or "default"
+        session = risk_engine.get_or_create_session(session_id)
+        
+        # Check using session state
+        return session.check_mission_complete()
+    
+    def get_agent_notes(self, session_id: str) -> str:
+        """Generate agent notes for final report"""
+        session = risk_engine.get_or_create_session(session_id)
+        
+        notes_parts = []
+        
+        # Engagement summary
+        notes_parts.append(
+            f"Engaged scammer over {session.turn_count} turns. "
+            f"Final stage: {session.scam_stage.value}."
         )
         
-        if has_critical_intel:
-            try:
-                intelligence_data = intelligence.model_dump() if hasattr(intelligence, 'model_dump') else intelligence.dict()
-            except:
-                return False
-                
-            prompt = f"""
-            You are a mission completion analyzer for a honeypot system.
-            Evaluate if sufficient intelligence has been extracted to complete the mission.
-
-            Criteria for completion:
-            - At least ONE high-value item: bank account, UPI ID, or phishing link
-            - OR multiple phone numbers + suspicious keywords
-            - Quality over quantity
-
-            Current intelligence:
-            {json.dumps(intelligence_data)}
-
-            Return JSON ONLY:
-            {{
-              "missionComplete": true/false,
-              "reason": "brief explanation of decision"
-            }}
-            """
-            
-            response = self.client.chat.completions.create(
-                messages=[
-                    {"role": "system", "content": "You output valid JSON only."},
-                    {"role": "user", "content": prompt}
-                ],
-                model=self.model,
-                temperature=0.1,
-                response_format={"type": "json_object"}
-            )
-            result = json.loads(response.choices[0].message.content)
-            return result.get("missionComplete", False)
-            
-        return False
+        # Detection summary
+        if session.hard_rule_triggered:
+            notes_parts.append("Hard rule triggered - definitive scam confirmation.")
+        else:
+            notes_parts.append(f"Risk score reached {session.risk_score}/100.")
+        
+        # Intelligence summary
+        intel_items = []
+        if session.upi_ids:
+            intel_items.append(f"{len(session.upi_ids)} UPI ID(s)")
+        if session.bank_accounts:
+            intel_items.append(f"{len(session.bank_accounts)} bank account(s)")
+        if session.phone_numbers:
+            intel_items.append(f"{len(session.phone_numbers)} phone number(s)")
+        if session.phishing_links:
+            intel_items.append(f"{len(session.phishing_links)} suspicious link(s)")
+        
+        if intel_items:
+            notes_parts.append(f"Extracted: {', '.join(intel_items)}.")
+        else:
+            notes_parts.append("Limited intelligence extracted.")
+        
+        return " ".join(notes_parts)
