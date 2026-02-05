@@ -145,6 +145,9 @@ class SessionState:
     4. triggeredSignals tracked per turn
     5. LLM judgements stored for analysis
     6. Persona state drifts dynamically
+    7. LANGUAGE LOCK: First agent reply sets session language
+    8. ANTI-LOOP: Track recent questions to prevent repetition
+    9. TERMINATION: Stall counter for graceful exit
     """
     
     def __init__(self, session_id: str):
@@ -183,6 +186,134 @@ class SessionState:
         # Stage history
         self.stage_history: List[tuple] = []
         self.created_at: datetime = datetime.now()
+        
+        # ===================================================================
+        # NEW: Language locking - prevents random language switching
+        # ===================================================================
+        self.locked_language: Optional[str] = None  # "hindi", "english", or None
+        
+        # ===================================================================
+        # NEW: Anti-loop tracking - prevents repetitive questions
+        # ===================================================================
+        self.recent_questions: List[str] = []  # Last N agent questions
+        self.question_intents: Dict[str, int] = {}  # intent -> count (max 2)
+        
+        # ===================================================================
+        # NEW: Stall detection - for graceful termination
+        # ===================================================================
+        self.stall_counter: int = 0  # Turns without new intel
+        self.last_intel_turn: int = 0  # Last turn with new extraction
+        self.should_terminate: bool = False  # Graceful exit flag
+    
+    # ===================================================================
+    # LANGUAGE LOCKING METHODS
+    # ===================================================================
+    
+    def lock_language(self, language: str):
+        """
+        Lock the session to a specific language.
+        Once locked, agent MUST respond in this language only.
+        Called ONCE on first agent reply.
+        """
+        if self.locked_language is None:
+            self.locked_language = language
+            logger.info(f"🌐 Language locked to: {language}")
+    
+    def get_locked_language(self) -> Optional[str]:
+        """Get the locked language for this session."""
+        return self.locked_language
+    
+    # ===================================================================
+    # ANTI-LOOP METHODS
+    # ===================================================================
+    
+    def add_question(self, question: str, intent: str):
+        """
+        Track agent question to prevent loops.
+        - Stores last 5 questions for similarity check
+        - Tracks intent count (max 2 per intent)
+        """
+        # Keep only last 5 questions
+        self.recent_questions.append(question.lower().strip())
+        if len(self.recent_questions) > 5:
+            self.recent_questions.pop(0)
+        
+        # Track intent count
+        self.question_intents[intent] = self.question_intents.get(intent, 0) + 1
+        
+        logger.info(f"🔄 Question tracked: intent={intent}, count={self.question_intents[intent]}")
+    
+    def is_question_blocked(self, question: str, intent: str) -> bool:
+        """
+        Check if a question should be blocked due to repetition.
+        
+        Returns True if:
+        - Similar question asked before (fuzzy match)
+        - Intent already asked 2+ times
+        """
+        # Block if intent already asked 2+ times
+        if self.question_intents.get(intent, 0) >= 2:
+            logger.warning(f"⛔ Blocked: intent '{intent}' already asked {self.question_intents[intent]} times")
+            return True
+        
+        # Block if similar question in recent history
+        question_lower = question.lower().strip()
+        for prev_q in self.recent_questions:
+            # Simple similarity: check if >60% words overlap
+            prev_words = set(prev_q.split())
+            new_words = set(question_lower.split())
+            if len(prev_words) > 0 and len(new_words) > 0:
+                overlap = len(prev_words & new_words) / max(len(prev_words), len(new_words))
+                if overlap > 0.6:
+                    logger.warning(f"⛔ Blocked: similar question already asked")
+                    return True
+        
+        return False
+    
+    # ===================================================================
+    # STALL DETECTION METHODS
+    # ===================================================================
+    
+    def record_intel_extraction(self):
+        """Record that intel was extracted this turn."""
+        self.last_intel_turn = self.turn_count
+        self.stall_counter = 0
+    
+    def check_stall(self) -> bool:
+        """
+        Check if conversation is stalled (no new intel in 3 turns).
+        
+        Returns True if:
+        - No new intelligence in last 3 consecutive turns
+        - Should trigger strategy change or termination
+        """
+        turns_since_intel = self.turn_count - self.last_intel_turn
+        if turns_since_intel >= 3:
+            self.stall_counter = turns_since_intel
+            return True
+        return False
+    
+    def should_gracefully_terminate(self) -> bool:
+        """
+        Check if agent should gracefully exit.
+        
+        Terminate if:
+        - At least 1 high-value artifact extracted AND
+        - (Stalled for 3+ turns OR max turns reached OR scammer repeating)
+        """
+        if self.should_terminate:
+            return True
+        
+        has_intel = self.has_high_value_intel()
+        is_stalled = self.check_stall()
+        max_turns = self.turn_count >= 20
+        
+        if has_intel and (is_stalled or max_turns):
+            self.should_terminate = True
+            logger.info(f"🛑 Graceful termination triggered: stalled={is_stalled}, max_turns={max_turns}")
+            return True
+        
+        return False
     
     def add_risk(self, score: int, reason: str = ""):
         """

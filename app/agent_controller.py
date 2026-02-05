@@ -197,6 +197,13 @@ class AgentController:
     - Can operate meaningfully at ALL stages
     - Persona drifts emotionally through conversation
     - Strategic extraction based on stage
+    
+    NEW FEATURES (Anti-loop, Language lock, Post-detection):
+    - Language locked per session (no random switching)
+    - Post-detection: switches to HIGH-YIELD extraction questions
+    - Anti-loop: tracks questions, blocks repetition
+    - Termination: graceful exit when stalled
+    - Response length: enforced 1-2 sentences max
     """
     
     def __init__(self):
@@ -207,6 +214,225 @@ class AgentController:
         self._init_stage_behaviors()
         self._init_scam_type_behaviors()
         self._init_response_templates()
+        self._init_post_detection_questions()
+        self._init_language_templates()
+    
+    def _init_language_templates(self):
+        """
+        Language-specific response templates.
+        LANGUAGE LOCK: Agent uses ONLY the locked language.
+        """
+        self.language_templates = {
+            "hindi": {
+                "confusion": [
+                    "Kya baat hai? Samajh nahi aaya.",
+                    "Beta, thoda dhire bolo, samajh nahi aa raha.",
+                    "Arey, kya keh rahe ho? Mujhe confusion ho raha hai.",
+                ],
+                "stalling": [
+                    "Ek minute ruko, phone charge par laga raha hoon.",
+                    "Abhi busy hoon, thodi der baad baat karte hain.",
+                    "Ruko, koi door par aaya hai.",
+                ],
+                "extraction": [
+                    "Aapka naam kya bola? Aur kahan se call kar rahe ho?",
+                    "Paise kahan bhejne hain? Account number batao.",
+                    "UPI se bhejun ya bank transfer se?",
+                    "Kaunsa app kholna hoga?",
+                ],
+                "termination": [
+                    "Accha beta, baad mein baat karte hain. Mera phone ki battery khatam ho rahi hai.",
+                    "Theek hai, main apne bete ko bula kar puchh leta hoon. Bye.",
+                    "Mujhe samajh nahi aa raha, main bank jaake puchhunga. Bye.",
+                ]
+            },
+            "english": {
+                "confusion": [
+                    "Sorry, I don't understand. Can you explain again?",
+                    "What are you saying? I'm confused.",
+                    "Wait, what? I didn't get that.",
+                ],
+                "stalling": [
+                    "Hold on, let me charge my phone.",
+                    "Someone is at the door, one minute.",
+                    "My network is very poor, can you repeat?",
+                ],
+                "extraction": [
+                    "What's your name again? Which branch are you calling from?",
+                    "Where should I send the money? What's the account number?",
+                    "Should I pay via UPI or bank transfer?",
+                    "Which app do I need to open?",
+                ],
+                "termination": [
+                    "Okay, let me call you back. My phone battery is low.",
+                    "Let me ask my son first. Bye for now.",
+                    "I don't understand, I'll go to the bank and ask. Bye.",
+                ]
+            }
+        }
+    
+    def _init_post_detection_questions(self):
+        """
+        HIGH-YIELD questions for post-detection intelligence extraction.
+        
+        POST-DETECTION STRATEGY:
+        - STOP identity verification questions
+        - SWITCH to action-oriented extraction
+        - Ask about payment methods, apps, next steps
+        """
+        self.post_detection_questions = {
+            "upi_missing": {
+                "intent": "payment_method",
+                "questions_hindi": [
+                    "Paise UPI se bhejun ya bank transfer se?",
+                    "Kaunsa UPI ID par bhejna hai?",
+                    "PhonePe se bhejun ya GPay se?",
+                ],
+                "questions_english": [
+                    "Should I pay via UPI or bank transfer?",
+                    "What UPI ID should I send to?",
+                    "Should I use PhonePe or GPay?",
+                ]
+            },
+            "phone_missing": {
+                "intent": "contact_method",
+                "questions_hindi": [
+                    "Aap call karoge ya main karun?",
+                    "Kaunsa number par call karna hai?",
+                    "WhatsApp par baat karein ya call par?",
+                ],
+                "questions_english": [
+                    "Will you call me or should I call you?",
+                    "What number should I call?",
+                    "Should we talk on WhatsApp or call?",
+                ]
+            },
+            "link_missing": {
+                "intent": "process_steps",
+                "questions_hindi": [
+                    "Kaunsa app kholna hoga?",
+                    "Link bhejo, main click karunga.",
+                    "Kya download karna padega?",
+                ],
+                "questions_english": [
+                    "Which app do I need to open?",
+                    "Send me the link, I'll click it.",
+                    "Do I need to download something?",
+                ]
+            },
+            "account_missing": {
+                "intent": "account_details",
+                "questions_hindi": [
+                    "Paise kahan bhejne hain? Account number batao.",
+                    "Kaunse bank mein transfer karna hai?",
+                    "Account number aur IFSC code bolo.",
+                ],
+                "questions_english": [
+                    "Where should I send the money? Tell me account number.",
+                    "Which bank should I transfer to?",
+                    "Tell me the account number and IFSC code.",
+                ]
+            },
+            "next_step": {
+                "intent": "next_steps",
+                "questions_hindi": [
+                    "OTP bhejne ke baad kya karna hoga?",
+                    "Paise bhejne ke baad aage kya step hai?",
+                    "Phir main kya karun?",
+                ],
+                "questions_english": [
+                    "After sending OTP, what's the next step?",
+                    "After sending money, what do I do next?",
+                    "What should I do then?",
+                ]
+            }
+        }
+    
+    def _detect_language(self, text: str) -> str:
+        """
+        Detect language from text (Hindi vs English).
+        Returns 'hindi' or 'english'.
+        
+        IMPROVED: More aggressive Hindi detection for romanized Hindi.
+        """
+        text_lower = text.lower()
+        
+        # Hindi indicators (Devanagari or transliterated)
+        hindi_words = [
+            'kya', 'hai', 'hain', 'mujhe', 'aap', 'aapka', 'kahan', 'kaun', 
+            'kyun', 'kaise', 'hoon', 'raha', 'nahi', 'bhai', 'beta', 'ji', 
+            'arre', 'accha', 'theek', 'ruko', 'batao', 'bhejo', 'turant',
+            'kripya', 'varna', 'abhi', 'sahayata', 'madad', 'isliye', 
+            'mera', 'naam', 'se', 'ke', 'liye', 'jayega', 'bheje',
+            'account', 'warna', 'ghante', 'mein', 'freeze', 'fund',
+            'sir', 'aapke', 'chahiye', 'dijiye', 'aaya', 'gaya'
+        ]
+        
+        # Count Hindi word matches
+        hindi_count = sum(1 for word in hindi_words if word in text_lower)
+        
+        # Check for Devanagari script
+        if re.search(r'[अ-ह]', text):
+            return "hindi"
+        
+        # If multiple Hindi words found, it's Hindi
+        if hindi_count >= 2:
+            return "hindi"
+        
+        return "english"
+    
+    def _get_missing_intel_type(self, session) -> Optional[str]:
+        """
+        Determine what intelligence is still missing.
+        Returns the type to ask about, or None if all collected.
+        """
+        if not session.upi_ids and not session.bank_accounts:
+            return "upi_missing" if random.random() > 0.5 else "account_missing"
+        if not session.phone_numbers:
+            return "phone_missing"
+        if not session.phishing_links:
+            return "link_missing"
+        return "next_step"
+    
+    def _get_post_detection_question(
+        self, 
+        session, 
+        language: str,
+        intelligence: ExtractedIntelligence
+    ) -> Tuple[str, str]:
+        """
+        Get a HIGH-YIELD extraction question based on missing intel.
+        
+        Returns: (question, intent)
+        
+        ANTI-LOOP: Checks if intent already asked 2+ times.
+        """
+        missing_type = self._get_missing_intel_type(session)
+        
+        if missing_type and missing_type in self.post_detection_questions:
+            q_data = self.post_detection_questions[missing_type]
+            intent = q_data["intent"]
+            
+            # Check if intent blocked
+            if session.is_question_blocked("", intent):
+                # Try next_step as fallback
+                q_data = self.post_detection_questions["next_step"]
+                intent = q_data["intent"]
+            
+            questions = q_data[f"questions_{language}"]
+            
+            # Find a question not recently asked
+            for q in questions:
+                if not session.is_question_blocked(q, intent):
+                    return q, intent
+            
+            # All blocked, return random from next_step
+            fallback = self.post_detection_questions["next_step"]
+            return random.choice(fallback[f"questions_{language}"]), "next_step"
+        
+        # Default fallback
+        templates = self.language_templates.get(language, self.language_templates["hindi"])
+        return random.choice(templates["extraction"]), "generic_extraction"
     
     def _init_stage_behaviors(self):
         """
@@ -456,6 +682,13 @@ class AgentController:
         BEHAVIOR DESIGN (Problem #5):
         - Driven by scamStage from session state
         - NOT the scam_detected boolean parameter
+        
+        NEW FEATURES:
+        - LANGUAGE LOCK: Detect and lock language on first reply
+        - POST-DETECTION: Switch to high-yield extraction questions
+        - ANTI-LOOP: Block repetitive questions
+        - TERMINATION: Graceful exit when stalled
+        - LENGTH: Enforce 1-2 sentences max
         """
         session_id = session_id or "default"
         
@@ -463,103 +696,128 @@ class AgentController:
         session = risk_engine.get_or_create_session(session_id)
         current_stage = session.scam_stage
         
+        # ===================================================================
+        # LANGUAGE LOCKING: Detect and lock language for session
+        # ===================================================================
+        if session.locked_language is None:
+            # Detect from first scammer message or conversation history
+            detected_lang = self._detect_language(latest_message)
+            # Check history for language hints
+            if conversation_history:
+                for msg in conversation_history[-3:]:
+                    text = msg.text if hasattr(msg, 'text') else msg.get('text', '')
+                    if self._detect_language(text) == "hindi":
+                        detected_lang = "hindi"
+                        break
+            session.lock_language(detected_lang)
+        
+        language = session.get_locked_language() or "hindi"
+        
+        # ===================================================================
+        # TERMINATION CHECK: Graceful exit if stalled
+        # ===================================================================
+        if session.should_gracefully_terminate():
+            templates = self.language_templates.get(language, self.language_templates["hindi"])
+            termination_response = random.choice(templates["termination"])
+            logger.info(f"🛑 Graceful termination: {termination_response[:50]}...")
+            return termination_response
+        
+        # ===================================================================
+        # POST-DETECTION STRATEGY: Switch to high-yield extraction
+        # ===================================================================
+        if scam_detected or current_stage in [ScamStage.ACTION, ScamStage.CONFIRMED, ScamStage.THREAT]:
+            # Use post-detection extraction questions instead of identity verification
+            extraction_question, intent = self._get_post_detection_question(session, language, intelligence)
+            
+            # Track this question to prevent loops
+            session.add_question(extraction_question, intent)
+            
+            # Check stall condition
+            session.check_stall()
+            
+            # Use template-based response for consistency (no LLM randomness)
+            logger.info(f"🎯 Post-detection mode: intent={intent}, lang={language}")
+            
+            # Build a short, focused response
+            response = await self._generate_post_detection_response(
+                latest_message, 
+                extraction_question, 
+                language, 
+                session, 
+                current_stage
+            )
+            
+            return response
+        
+        # ===================================================================
+        # PRE-DETECTION: Normal flow with LLM (for NORMAL, HOOK stages)
+        # ===================================================================
+        
         # Detect scam type for specialized behavior
         scam_type = self._detect_scam_type(latest_message, conversation_history)
         
         # Get dynamic persona
         persona = self._get_dynamic_persona(session_id, scam_type)
         
-        # Build conversation context (only from last 6 messages)
+        # Build conversation context (only from last 4 messages for brevity)
         history_text = ""
         if conversation_history:
             history_text = "\n".join([
                 f"{'Them' if hasattr(msg, 'sender') and msg.sender == 'scammer' else 'Me'}: "
                 f"{msg.text if hasattr(msg, 'text') else msg.get('text', '')}"
-                for msg in conversation_history[-6:]
+                for msg in conversation_history[-4:]
             ])
         
-        # Select appropriate questions based on stage
-        stage_questions = persona["stage_questions"]
+        # Select appropriate questions based on stage (limit to 2)
+        stage_questions = persona["stage_questions"][:2]
+        
+        # Language instruction for LLM
+        lang_instruction = "Respond in Hindi (Romanized/Hinglish)" if language == "hindi" else "Respond in English"
         
         # ==================================================================
-        # SAFE LLM PROMPT - with explicit ethical constraints
+        # SAFE LLM PROMPT - with explicit constraints
         # ==================================================================
-        prompt = f"""You are an AI agent playing a CONFUSED, NON-TECHNICAL victim in a scam honeypot.
+        prompt = f"""You are playing a CONFUSED, NON-TECHNICAL victim in a scam honeypot.
 
-═══════════════════════════════════════════════════════════════════════════════
-ABSOLUTE SAFETY RULES (NEVER VIOLATE):
-═══════════════════════════════════════════════════════════════════════════════
-1. NEVER provide ANY numbers: OTP, PIN, CVV, account numbers, card numbers
-2. NEVER share bank account details, UPI IDs, or IFSC codes
-3. NEVER claim to be police, CID, bank official, or any authority
-4. NEVER say you have transferred money or sent payment
-5. NEVER fabricate FIR numbers, case numbers, or reference IDs
-6. ALWAYS deflect sensitive requests with realistic excuses
+ABSOLUTE RULES:
+1. NEVER provide OTP, PIN, CVV, account numbers, or any codes
+2. NEVER claim to be police, bank official, or any authority
+3. ALWAYS deflect sensitive requests with excuses
+4. {lang_instruction} - DO NOT switch languages
+5. Keep response to 1-2 SENTENCES ONLY (MAX 30 words)
 
-YOUR SAFE DEFLECTION STRATEGIES:
-- "I need to ask my son/husband first"
+DEFLECTION EXCUSES:
 - "My phone battery is low"
-- "Can you repeat that? The network is poor"
-- "Let me verify this with my bank first"
-- "I don't have that information with me right now"
-- "Someone is at the door, one minute"
+- "Let me ask my son first"
+- "Can you repeat? Network is poor"
 
-═══════════════════════════════════════════════════════════════════════════════
-YOUR CHARACTER:
-═══════════════════════════════════════════════════════════════════════════════
-- {persona['base']} - {persona['detail']}
-- Current emotion: {persona['emotion']}
-- Tone: {persona['tone']}
-- Strategy: {persona['strategy']}
-
-SCAM TYPE DETECTED: {scam_type}
-CURRENT STAGE: {current_stage.value}
-
-═══════════════════════════════════════════════════════════════════════════════
 CONVERSATION:
-═══════════════════════════════════════════════════════════════════════════════
-{history_text if history_text else "(conversation just started)"}
+{history_text if history_text else "(just started)"}
 
-THEIR LATEST MESSAGE: "{latest_message}"
+THEIR MESSAGE: "{latest_message}"
 
-═══════════════════════════════════════════════════════════════════════════════
-YOUR GOAL:
-═══════════════════════════════════════════════════════════════════════════════
-Extract THEIR information by asking questions like:
-{chr(10).join(f'- {q}' for q in stage_questions[:3])}
+Ask ONE of these (pick the most relevant):
+- {stage_questions[0] if stage_questions else "Who is this?"}
 
-Information to extract from THEM: {', '.join(persona['extraction_focus']) if persona['extraction_focus'] else 'their identity, contact details, account they want you to send to'}
+Generate 1-2 sentence response ONLY:"""
 
-Generate a response that:
-1. DEFLECTS any request for sensitive information
-2. Asks THEM to provide more details (their account, their name, their reference)
-3. Uses realistic excuses to avoid complying
-4. Sounds like an actual confused Indian person
-5. Is 1-3 sentences maximum
-
-Output ONLY the message text:"""
-
-        max_attempts = 3
+        max_attempts = 2
         for attempt in range(max_attempts):
             try:
                 if not self.client:
-                    return self._get_fallback_response(current_stage, persona)
+                    return self._get_fallback_response_language(current_stage, language)
                 
                 response = self.client.chat.completions.create(
                     model=self.model,
                     messages=[
                         {
                             "role": "system",
-                            "content": (
-                                "You are playing a confused victim. NEVER provide any numbers, "
-                                "codes, PINs, OTPs, or account details. NEVER impersonate police "
-                                "or bank officials. Always deflect and ask THEM for details."
-                            )
+                            "content": f"You are a confused victim. {lang_instruction}. Keep responses to 1-2 sentences. NEVER provide codes or numbers."
                         },
                         {"role": "user", "content": prompt}
                     ],
-                    temperature=0.7,
-                    max_tokens=150
+                    temperature=0.6,
+                    max_tokens=60  # Enforce short responses
                 )
                 
                 reply = response.choices[0].message.content.strip()
@@ -569,32 +827,144 @@ Output ONLY the message text:"""
                 if reply.startswith("Me:"):
                     reply = reply[3:].strip()
                 
+                # ===================================================================
+                # LENGTH ENFORCEMENT: Truncate to 2 sentences max
+                # ===================================================================
+                reply = self._enforce_length_limit(reply)
+                
                 # ===========================================================
                 # SAFETY VALIDATION - Block unsafe content
                 # ===========================================================
                 is_safe, violations, _ = SafetyValidator.validate_output(reply)
                 
                 if is_safe:
-                    logger.info(f"✅ Agent response validated: {reply[:50]}...")
+                    # Track the question intent
+                    intent = self._extract_intent_from_response(reply)
+                    session.add_question(reply, intent)
+                    
+                    logger.info(f"✅ Agent response ({language}): {reply[:50]}...")
                     return reply
                 else:
-                    # Log violation and retry
-                    logger.warning(
-                        f"⚠️ Attempt {attempt + 1}: Unsafe content blocked. "
-                        f"Violations: {violations}"
-                    )
+                    logger.warning(f"⚠️ Attempt {attempt + 1}: Unsafe content blocked.")
                     if attempt < max_attempts - 1:
                         continue
                     else:
-                        # After max attempts, use safe deflection
-                        logger.warning("⚠️ Max attempts reached. Using safe deflection.")
-                        return SafetyValidator.get_safe_deflection(current_stage)
+                        return self._get_fallback_response_language(current_stage, language)
                 
             except Exception as e:
                 logger.error(f"Agent response error: {e}")
-                return self._get_fallback_response(current_stage, persona)
+                return self._get_fallback_response_language(current_stage, language)
         
-        return self._get_fallback_response(current_stage, persona)
+        return self._get_fallback_response_language(current_stage, language)
+    
+    async def _generate_post_detection_response(
+        self,
+        scammer_message: str,
+        extraction_question: str,
+        language: str,
+        session,
+        stage: ScamStage
+    ) -> str:
+        """
+        Generate post-detection response with extraction question.
+        
+        Uses minimal LLM to add natural variation, but falls back to template.
+        Response is always 1-2 sentences with the extraction question.
+        """
+        # Get language templates
+        templates = self.language_templates.get(language, self.language_templates["hindi"])
+        
+        # Try LLM for natural variation
+        if self.client:
+            try:
+                lang_instruction = "Hindi (Romanized)" if language == "hindi" else "English"
+                prompt = f"""You are a confused victim. Generate a 1-2 sentence response in {lang_instruction}.
+
+Their message: "{scammer_message[:100]}"
+
+Your response MUST:
+1. Show slight confusion
+2. End with this question: "{extraction_question}"
+
+Generate response (1-2 sentences only):"""
+
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.5,
+                    max_tokens=50
+                )
+                
+                reply = response.choices[0].message.content.strip().strip('"\'')
+                reply = self._enforce_length_limit(reply)
+                
+                # Validate safety
+                is_safe, _, _ = SafetyValidator.validate_output(reply)
+                if is_safe:
+                    return reply
+                    
+            except Exception as e:
+                logger.warning(f"Post-detection LLM failed: {e}")
+        
+        # Fallback: Use template + extraction question
+        confusion = random.choice(templates["confusion"])
+        return f"{confusion} {extraction_question}"
+    
+    def _enforce_length_limit(self, text: str, max_sentences: int = 2) -> str:
+        """
+        Enforce 1-2 sentence limit on responses.
+        
+        Splits by sentence-ending punctuation and keeps only first N sentences.
+        """
+        # Split by sentence endings
+        sentences = re.split(r'(?<=[.!?।])\s+', text.strip())
+        
+        if len(sentences) <= max_sentences:
+            return text.strip()
+        
+        # Keep only first N sentences
+        truncated = ' '.join(sentences[:max_sentences])
+        logger.info(f"✂️ Truncated response from {len(sentences)} to {max_sentences} sentences")
+        return truncated
+    
+    def _extract_intent_from_response(self, response: str) -> str:
+        """
+        Extract the intent/question type from an agent response.
+        Used for anti-loop tracking.
+        """
+        response_lower = response.lower()
+        
+        intent_patterns = {
+            "identity": ["naam", "name", "who", "kaun", "kon"],
+            "payment_method": ["upi", "transfer", "payment", "paise", "paisa", "bhej"],
+            "contact": ["call", "phone", "number", "whatsapp"],
+            "process": ["app", "link", "download", "step", "kaise"],
+            "account": ["account", "bank", "ifsc"],
+            "verification": ["verify", "confirm", "check"],
+        }
+        
+        for intent, keywords in intent_patterns.items():
+            if any(kw in response_lower for kw in keywords):
+                return intent
+        
+        return "generic"
+    
+    def _get_fallback_response_language(self, stage: ScamStage, language: str) -> str:
+        """
+        Get fallback response in the locked language.
+        """
+        templates = self.language_templates.get(language, self.language_templates["hindi"])
+        
+        if stage == ScamStage.NORMAL:
+            return random.choice(templates["confusion"])
+        elif stage in [ScamStage.HOOK, ScamStage.TRUST]:
+            options = templates["confusion"] + templates["stalling"]
+            return random.choice(options)
+        elif stage in [ScamStage.THREAT, ScamStage.ACTION, ScamStage.CONFIRMED]:
+            options = templates["extraction"] + templates["stalling"]
+            return random.choice(options)
+        else:
+            return random.choice(templates["confusion"])
     
     def _get_fallback_response(self, stage: ScamStage, persona: Dict) -> str:
         """
