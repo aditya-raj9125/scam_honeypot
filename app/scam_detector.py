@@ -1,16 +1,23 @@
 """
 SCAM DETECTOR - Hybrid detection pipeline with LLM reasoning judge
-REFACTORED to fix Problems #4, #10, #12
+REFACTORED for SAFETY, EXPLAINABILITY, and BOUNDED SCORING
 
-KEY CHANGES:
-- LLM is now a REASONING JUDGE, not keyword detector (Problem #4)
-- Clear separation of detection responsibilities (Problem #10)
-- ML influences risk score, doesn't override (Problem #12)
+PROBLEMS FIXED:
+- #4: LLM is now a REASONING JUDGE (not keyword detector)
+- #9: Risk scoring is mathematically bounded 0-100
+- #10: Clear separation of detection responsibilities
+- #12: ML influences risk score, doesn't override
+
+KEY DESIGN:
 - Detection runs on EVERY turn with stateful accumulation
+- LLM MUST influence final decision (never ignored)
+- All scoring is bounded and explainable
+- Logging for audit trail
 """
 
 import os
 import json
+import logging
 from typing import Dict, List, Optional
 from dotenv import load_dotenv
 from groq import AsyncGroq
@@ -22,6 +29,10 @@ from .risk_engine import (
 from .ml_detector import ml_detector
 
 load_dotenv()
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 class LLMReasoningJudge:

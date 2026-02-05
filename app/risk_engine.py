@@ -1,19 +1,35 @@
 """
-RISK SCORING ENGINE - Cumulative risk calculation with hard/soft rules
-REFACTORED to fix Problems #2, #3, #11, #12
+RISK SCORING ENGINE - Bounded cumulative risk calculation with hard/soft rules
+REFACTORED for MATHEMATICAL SOUNDNESS and EXPLAINABILITY
 
-KEY CHANGES:
-- Risk NEVER resets mid-session (cumulative)
-- Hard rules IMMEDIATELY set scamDetected = True
-- Clear thresholds: ≥25 SUSPICIOUS, ≥50 THREAT, ≥70 CONFIRMED
-- ML/LLM scores INFLUENCE risk, don't override
+KEY SAFETY & QUALITY RULES:
+1. Risk score is BOUNDED: 0-100 (never unbounded)
+2. Risk is CUMULATIVE but CLAMPED: never exceeds 100
+3. Hard rules IMMEDIATELY set scamDetected = True
+4. Every risk change is LOGGED with explanation
+5. Stage transitions are EXPLICIT and TRACEABLE
+
+RISK THRESHOLDS (Explainable):
+- 0-24:   NORMAL - No suspicious activity
+- 25-49:  SUSPICIOUS/HOOK - Initial red flags
+- 50-69:  THREAT - Clear scam indicators
+- 70-100: CONFIRMED - Definitive scam
+
+SCORING MATH:
+riskScore = min(riskScore + delta, 100)
+This ensures bounded, predictable scoring.
 """
 
 import re
+import logging
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass, field
 from enum import Enum
 from datetime import datetime
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 class ScamStage(str, Enum):
@@ -169,12 +185,36 @@ class SessionState:
         self.created_at: datetime = datetime.now()
     
     def add_risk(self, score: int, reason: str = ""):
-        """Add risk score - CUMULATIVE, never resets"""
-        self.risk_score += score
+        """
+        Add risk score - CUMULATIVE but BOUNDED to 100.
+        
+        MATHEMATICAL SOUNDNESS (Problem #4, #9):
+        - Score is added cumulatively (never resets)
+        - Final score is clamped: min(current + delta, 100)
+        - Every change is logged with reason for explainability
+        """
+        old_score = self.risk_score
+        # BOUNDED: Clamp to maximum 100
+        self.risk_score = min(self.risk_score + score, 100)
+        
+        # Log the change for explainability
+        if reason:
+            logger.info(
+                f"📊 Risk: {old_score} → {self.risk_score} (+{score}) | {reason}"
+            )
+        
         self._check_risk_thresholds()
     
     def _check_risk_thresholds(self):
-        """Update scam stage based on risk thresholds"""
+        """
+        Update scam stage based on risk thresholds.
+        
+        THRESHOLD MAPPING (Problem #9 - Explainable):
+        - 0-24:   NORMAL  (no action)
+        - 25-49:  HOOK    (initial suspicion)
+        - 50-69:  THREAT  (confirmed tactics)
+        - 70-100: CONFIRMED (definitive scam)
+        """
         if self.risk_score >= 70:
             if self.scam_stage != ScamStage.CONFIRMED:
                 self._transition_stage(ScamStage.CONFIRMED)
@@ -187,17 +227,35 @@ class SessionState:
                 self._transition_stage(ScamStage.HOOK)
     
     def trigger_hard_rule(self, rule_name: str, score: int):
-        """Hard rules IMMEDIATELY set scamDetected = True"""
+        """
+        Hard rules IMMEDIATELY set scamDetected = True.
+        
+        HARD RULE DESIGN (Problem #11):
+        - Immediate detection, no threshold needed
+        - Logs the trigger for audit trail
+        - Transitions to ACTION stage
+        """
         self.hard_rule_triggered = True
         self.scam_detected = True
+        
+        logger.warning(f"🚨 HARD RULE TRIGGERED: {rule_name}")
+        
         self.add_risk(score, f"HARD RULE: {rule_name}")
         if self.scam_stage not in [ScamStage.ACTION, ScamStage.CONFIRMED]:
             self._transition_stage(ScamStage.ACTION)
     
     def _transition_stage(self, new_stage: ScamStage):
-        """Record stage transition"""
+        """
+        Record stage transition with logging.
+        
+        EXPLAINABILITY: Every stage change is logged with timestamp.
+        """
+        old_stage = self.scam_stage
         self.stage_history.append((self.scam_stage, self.turn_count, datetime.now()))
         self.scam_stage = new_stage
+        
+        logger.info(f"📈 Stage: {old_stage.value} → {new_stage.value}")
+        
         self._update_persona_for_stage()
     
     def _update_persona_for_stage(self):
@@ -283,10 +341,15 @@ class SessionState:
         return False
     
     def to_dict(self) -> Dict:
-        """Convert state to dictionary"""
+        """
+        Convert state to dictionary for API responses.
+        
+        BOUNDED SCORE: risk_score is guaranteed 0-100
+        """
         return {
             "session_id": self.session_id,
-            "risk_score": self.risk_score,
+            "risk_score": self.risk_score,  # Guaranteed 0-100
+            "risk_score_max": 100,  # For UI display purposes
             "scam_stage": self.scam_stage.value,
             "scam_detected": self.scam_detected,
             "hard_rule_triggered": self.hard_rule_triggered,

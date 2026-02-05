@@ -120,15 +120,18 @@ async def chat_handler(request: IncomingRequest, api_key: str = Depends(get_api_
         
         # =====================================================================
         # STEP 7: Heavy Intelligence Extraction (at THREAT+ stages)
+        # SAFETY: Only extract from SCAMMER messages, never from agent
         # Light extraction already happened in detection pipeline
         # =====================================================================
         current_stage = ScamStage(detection_result["scam_stage"])
         
+        # Extract intelligence ONLY from scammer message (source attribution)
         intel = intelligence_extractor.extract(
             request.message.text,
             intel,
             session_id,
-            scam_stage=current_stage
+            scam_stage=current_stage,
+            message_source="scammer"  # CRITICAL: Explicit source attribution
         )
         
         # Sync extracted intel back to session

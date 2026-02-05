@@ -1,39 +1,71 @@
 """
-INTELLIGENCE EXTRACTOR - Light and Heavy extraction system
-REFACTORED to fix Problem #1 and #7
+INTELLIGENCE EXTRACTOR - Light and Heavy extraction with SOURCE ATTRIBUTION
+REFACTORED for SAFETY and DATA QUALITY
+
+CRITICAL SAFETY RULES:
+1. Extract ONLY from SCAMMER messages, NEVER from agent messages
+2. Every extraction item has explicit source attribution
+3. Confidence scoring based on pattern strength
+4. Deduplication to prevent contaminated data
+5. Clear separation between detection and extraction
 
 KEY CHANGES:
-- Split into LIGHT extraction (every turn) and HEAVY extraction (THREAT+ stages)
-- Light: keywords, intent hints
-- Heavy: UPI IDs, bank accounts, URLs, phone numbers
-- Deterministic regex-based extraction
-- Track source turn and confidence
+- Source attribution: every item tagged with source="scammer"
+- Confidence scoring: 0.0-1.0 based on pattern reliability
+- Turn tracking: which turn the intel was extracted from
+- Agent message filtering: never extract from our own responses
 """
 
 import re
+import logging
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
 from .models import ExtractedIntelligence
 from .risk_engine import ScamStage
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 
 @dataclass
-class ExtractionItem:
-    """Tracked intelligence extraction with metadata"""
+class AttributedExtraction:
+    """
+    Intelligence extraction with MANDATORY source attribution.
+    
+    SAFETY: This ensures all extracted intel can be traced to
+    the scammer, not fabricated by our agent.
+    """
     value: str
-    item_type: str  # upi, bank_account, phone, url, keyword, etc.
-    confidence: float
-    source_turn: int
-    context: str
+    item_type: str  # upi, bank_account, phone, url, keyword
+    source: str  # ALWAYS "scammer" - we never extract from agent
+    confidence: float  # 0.0-1.0 based on pattern strength
+    turn_number: int
+    context: str  # Surrounding text for verification
     timestamp: datetime = field(default_factory=datetime.now)
+    
+    def to_dict(self) -> Dict:
+        return {
+            "value": self.value,
+            "type": self.item_type,
+            "source": self.source,
+            "confidence": self.confidence,
+            "turn": self.turn_number,
+        }
 
 
 class IntelligenceExtractor:
     """
     Production-grade intelligence extraction for Indian scams.
     
-    SPLIT EXTRACTION (Problem #7):
+    SAFETY DESIGN (Problems #3, #8):
+    - Extract ONLY from scammer messages
+    - Never extract from agent-generated content
+    - All extractions have source attribution
+    - Confidence scoring for quality assessment
+    
+    EXTRACTION STRATEGY (Problem #7):
     1. LIGHT extraction - runs every turn (keywords, intent hints)
     2. HEAVY extraction - runs at THREAT+ stages (UPI, bank, phone, URL)
     """
@@ -41,7 +73,8 @@ class IntelligenceExtractor:
     def __init__(self):
         self._init_patterns()
         self._init_keyword_patterns()
-        self.extraction_history: Dict[str, List[ExtractionItem]] = {}
+        # Attributed extractions with source tracking
+        self.attributed_extractions: Dict[str, List[AttributedExtraction]] = {}
         self.turn_counter: Dict[str, int] = {}
     
     def _init_patterns(self):
@@ -232,8 +265,8 @@ class IntelligenceExtractor:
         - Telegram/WhatsApp handles
         """
         # Initialize extraction history
-        if session_id not in self.extraction_history:
-            self.extraction_history[session_id] = []
+        if session_id not in self.attributed_extractions:
+            self.attributed_extractions[session_id] = []
         
         # Extract UPI IDs
         self._extract_upi_ids(text, current_intelligence, turn_number, session_id)
@@ -257,22 +290,34 @@ class IntelligenceExtractor:
         text: str, 
         current_intelligence: ExtractedIntelligence, 
         session_id: str,
-        scam_stage: ScamStage = ScamStage.NORMAL
+        scam_stage: ScamStage = ScamStage.NORMAL,
+        message_source: str = "scammer"
     ) -> ExtractedIntelligence:
         """
         Main extraction method - decides light vs heavy based on stage.
+        
+        CRITICAL SAFETY (Problem #3, #8):
+        - ONLY extract from scammer messages
+        - If message_source is not "scammer", skip extraction entirely
         
         EXTRACTION STRATEGY (Problem #7):
         - NORMAL, HOOK: Light extraction only (keywords)
         - TRUST+: Heavy extraction (full intel)
         """
+        # ==================================================================
+        # SAFETY CHECK: Only extract from scammer messages
+        # ==================================================================
+        if message_source != "scammer":
+            logger.debug(f"Skipping extraction for non-scammer message (source={message_source})")
+            return current_intelligence
+        
         # Track turn
         if session_id not in self.turn_counter:
             self.turn_counter[session_id] = 0
         self.turn_counter[session_id] += 1
         turn = self.turn_counter[session_id]
         
-        # LIGHT extraction - always runs
+        # LIGHT extraction - always runs for scammer messages
         keywords, intent_hints = self.extract_light(text, session_id, turn)
         
         # Add keywords to intelligence
@@ -435,22 +480,41 @@ class IntelligenceExtractor:
         turn: int, 
         context: str
     ):
-        """Record extraction with metadata for tracking"""
-        if session_id not in self.extraction_history:
-            self.extraction_history[session_id] = []
+        """
+        Record extraction with MANDATORY source attribution.
         
-        item = ExtractionItem(
+        SAFETY: Source is ALWAYS "scammer" because we only call
+        this method for scammer messages (filtered in extract()).
+        """
+        if session_id not in self.attributed_extractions:
+            self.attributed_extractions[session_id] = []
+        
+        item = AttributedExtraction(
             value=value,
             item_type=item_type,
+            source="scammer",  # ALWAYS scammer - we never extract from agent
             confidence=confidence,
-            source_turn=turn,
-            context=context
+            turn_number=turn,
+            context=context[:100]  # Limit context length
         )
-        self.extraction_history[session_id].append(item)
+        self.attributed_extractions[session_id].append(item)
+        
+        # Log extraction with attribution
+        logger.info(
+            f"📥 Extracted [{item_type}]: {value} "
+            f"(source=scammer, confidence={confidence:.2f}, turn={turn})"
+        )
     
     def get_extraction_summary(self, session_id: str) -> Dict:
-        """Get summary of all extractions for a session"""
-        history = self.extraction_history.get(session_id, [])
+        """
+        Get summary of all extractions for a session with source attribution.
+        
+        Returns structured data showing:
+        - All extractions grouped by type
+        - Source attribution (always "scammer")
+        - Confidence scores
+        """
+        history = self.attributed_extractions.get(session_id, [])
         
         by_type = {}
         for item in history:
@@ -458,15 +522,18 @@ class IntelligenceExtractor:
                 by_type[item.item_type] = []
             by_type[item.item_type].append({
                 "value": item.value,
+                "source": item.source,
                 "confidence": item.confidence,
-                "turn": item.source_turn
+                "turn": item.turn_number
             })
         
         return {
             "total_items": len(history),
+            "all_from_scammer": True,  # By design, we only extract from scammer
             "by_type": by_type,
             "high_value_count": sum(1 for item in history 
-                                   if item.item_type in ["upi", "bank_account", "phone"])
+                                   if item.item_type in ["upi", "bank_account", "phone"]),
+            "attributions": [item.to_dict() for item in history]
         }
     
     def has_high_value_intel(self, intel: ExtractedIntelligence) -> bool:

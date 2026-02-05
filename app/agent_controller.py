@@ -1,22 +1,191 @@
 """
 AGENT CONTROLLER - Stage-based agentic behavior with dynamic persona
-REFACTORED to fix Problems #5, #6, #7
+REFACTORED with CRITICAL SAFETY GUARDRAILS
 
-KEY CHANGES:
-- Agent behavior depends on scamStage, NOT scamDetected boolean (Problem #5)
-- Agent can operate meaningfully in SUSPICIOUS/HOOK stages (Problem #6)
-- Persona is dynamic with emotional drift (Problem #7)
-- Never reveals detection, never provides real OTP/payment
-- Strategic intelligence extraction
+KEY SAFETY RULES:
+1. Agent NEVER provides sensitive data (OTP, PIN, bank details, FIR numbers)
+2. Agent NEVER impersonates authorities (police, CID, bank officials)
+3. Agent deflects sensitive requests using realistic excuses
+4. Output validation prevents unsafe content from being sent
+5. All intelligence comes FROM scammer, never from agent
+
+DESIGN:
+- Behavior driven by scamStage, NOT scamDetected boolean
+- Persona drifts emotionally (confusion → anxiety → frustration)
+- Deflection strategies instead of compliance
+- Strategic questioning to extract scammer intel
 """
 
 import os
 import json
+import re
 import random
-from typing import Dict, List, Optional
+import logging
+from typing import Dict, List, Optional, Tuple
 from groq import Groq
 from .models import ExtractedIntelligence
 from .risk_engine import risk_engine, ScamStage, EmotionalState
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+# ==============================================================================
+# SAFETY GUARDRAILS - Patterns that MUST NOT appear in agent output
+# ==============================================================================
+
+class SafetyValidator:
+    """
+    CRITICAL SAFETY COMPONENT
+    Validates agent output and blocks unsafe content.
+    
+    Problems Fixed:
+    - #1: Agent shares fake bank accounts, OTPs, FIR numbers (BLOCKED)
+    - #2: Agent impersonates authorities (BLOCKED)
+    - #6: Agent over-complies instead of deflecting (ENFORCED)
+    - #12: Ethical safeguards missing (IMPLEMENTED)
+    """
+    
+    # Patterns that MUST NEVER appear in agent output
+    FORBIDDEN_PATTERNS = [
+        # OTP/PIN patterns - agent must NEVER provide these
+        re.compile(r'\b(?:otp|o\.t\.p)\s*(?:is|:)?\s*\d{4,8}\b', re.I),
+        re.compile(r'\b(?:pin|mpin|upi\s*pin)\s*(?:is|:)?\s*\d{4,6}\b', re.I),
+        re.compile(r'\b(?:cvv|cvc)\s*(?:is|:)?\s*\d{3,4}\b', re.I),
+        re.compile(r'\bcode\s*(?:is|:)?\s*\d{4,8}\b', re.I),
+        
+        # Bank account patterns - agent must NEVER provide these
+        re.compile(r'\b(?:account|a/c)\s*(?:number|no\.?|#)?\s*(?:is|:)?\s*\d{9,18}\b', re.I),
+        re.compile(r'\bifsc\s*(?:code|:)?\s*[A-Z]{4}0[A-Z0-9]{6}\b', re.I),
+        
+        # UPI ID patterns - agent must NEVER provide these
+        re.compile(r'\b(?:upi|vpa)\s*(?:id|:)?\s*\S+@\S+\b', re.I),
+        re.compile(r'\bmy\s+(?:upi|vpa)\s*(?:is|:)?\s*\S+@\S+\b', re.I),
+        
+        # Card number patterns
+        re.compile(r'\b(?:card|debit|credit)\s*(?:number|no\.?)?\s*(?:is|:)?\s*\d{13,19}\b', re.I),
+        
+        # Aadhaar/PAN patterns - agent must NEVER provide these
+        re.compile(r'\b(?:aadhaar|aadhar)\s*(?:number|no\.?)?\s*(?:is|:)?\s*\d{4}\s*\d{4}\s*\d{4}\b', re.I),
+        re.compile(r'\bpan\s*(?:number|no\.?)?\s*(?:is|:)?\s*[A-Z]{5}\d{4}[A-Z]\b', re.I),
+        
+        # FIR/Case number patterns - agent must NEVER fabricate these
+        re.compile(r'\b(?:fir|case)\s*(?:number|no\.?)?\s*(?:is|:)?\s*[A-Z0-9/-]{5,}\b', re.I),
+        re.compile(r'\b(?:complaint|reference)\s*(?:number|no\.?)?\s*(?:is|:)?\s*[A-Z0-9/-]{5,}\b', re.I),
+    ]
+    
+    # Authority impersonation patterns - agent must NEVER claim to be these
+    AUTHORITY_IMPERSONATION = [
+        re.compile(r'\bi\s+am\s+(?:a\s+)?(?:police|inspector|officer|constable)\b', re.I),
+        re.compile(r'\bi\s+am\s+(?:from\s+)?(?:cid|cbi|ib|raw|enforcement)\b', re.I),
+        re.compile(r'\bi\s+am\s+(?:from\s+)?(?:cyber\s*(?:cell|crime|police))\b', re.I),
+        re.compile(r'\bi\s+am\s+(?:a\s+)?(?:the\s+)?bank\s*(?:manager|officer|official|employee)\b', re.I),
+        re.compile(r'\bi\s+(?:work\s+)?(?:at|for|with)\s+(?:the\s+)?(?:police|cid|bank|rbi)\b', re.I),
+        re.compile(r'\bthis\s+is\s+(?:the\s+)?(?:police|cyber\s*cell|bank|rbi)\b', re.I),
+        re.compile(r'\bspeaking\s+from\s+(?:the\s+)?(?:police|cyber|bank|rbi)\b', re.I),
+        re.compile(r'\bi\s+am\s+the\s+(?:bank\s+)?manager\b', re.I),
+    ]
+    
+    # Patterns that indicate over-compliance (should deflect instead)
+    OVER_COMPLIANCE_PATTERNS = [
+        re.compile(r'\bhere\s+(?:is|are)\s+(?:my|the)\s+(?:otp|pin|code|account|details)\b', re.I),
+        re.compile(r'\bi\s+(?:am|will)\s+(?:sending|sharing|giving|telling)\s+(?:you\s+)?(?:my|the)\s+(?:otp|pin)\b', re.I),
+        re.compile(r'\blet\s+me\s+(?:share|send|give|tell)\s+(?:you\s+)?(?:my|the)\s+(?:otp|pin|code)\b', re.I),
+        re.compile(r'\btake\s+(?:down\s+)?(?:my|these)\s+(?:details|information|account)\b', re.I),
+        re.compile(r'\bi\s+(?:have\s+)?(?:transferred|sent|paid)\s+(?:the\s+)?(?:money|amount|rs)\b', re.I),
+    ]
+    
+    @classmethod
+    def validate_output(cls, text: str) -> Tuple[bool, List[str], str]:
+        """
+        Validate agent output for safety violations.
+        
+        Returns: (is_safe, violations, cleaned_text)
+        """
+        violations = []
+        
+        # Check for forbidden patterns (sensitive data)
+        for pattern in cls.FORBIDDEN_PATTERNS:
+            if pattern.search(text):
+                match = pattern.search(text)
+                violations.append(f"SENSITIVE_DATA: {match.group()}")
+                logger.warning(f"⚠️ SAFETY: Blocked sensitive data in agent output")
+        
+        # Check for authority impersonation
+        for pattern in cls.AUTHORITY_IMPERSONATION:
+            if pattern.search(text):
+                match = pattern.search(text)
+                violations.append(f"AUTHORITY_IMPERSONATION: {match.group()}")
+                logger.warning(f"⚠️ SAFETY: Blocked authority impersonation")
+        
+        # Check for over-compliance
+        for pattern in cls.OVER_COMPLIANCE_PATTERNS:
+            if pattern.search(text):
+                match = pattern.search(text)
+                violations.append(f"OVER_COMPLIANCE: {match.group()}")
+                logger.warning(f"⚠️ SAFETY: Detected over-compliance behavior")
+        
+        is_safe = len(violations) == 0
+        return is_safe, violations, text
+    
+    @classmethod
+    def get_safe_deflection(cls, stage: ScamStage, violation_type: str = None) -> str:
+        """
+        Get a safe deflection response when violations are detected.
+        These are realistic excuses a real person would use.
+        """
+        deflections = {
+            "otp_request": [
+                "Wait, I think I deleted that message by mistake. Can you send it again?",
+                "Arey, my phone is showing low battery. Let me charge it first.",
+                "The OTP? Let me check... I'm getting so many messages, it's confusing.",
+                "Hold on, my daughter is calling me. Can I call you back?",
+                "Sorry, I can't find that message. Is there another way to verify?",
+            ],
+            "pin_request": [
+                "PIN? I don't remember it. I always use fingerprint for my payments.",
+                "Wait, which PIN are you asking for? I have so many different ones.",
+                "I'm confused, should I really share my PIN? My son told me never to share it.",
+                "Let me ask my husband first, he handles all the banking.",
+                "Arey, I don't know my PIN by heart. I'll need to find where I wrote it.",
+            ],
+            "account_request": [
+                "I don't have my passbook with me right now. It's at home.",
+                "Account number? Let me check my bank app... it's taking time to load.",
+                "I'm not near my computer. Can I send it later?",
+                "Which account are you asking about? I have multiple bank accounts.",
+                "Wait, let me call my bank first to confirm this is safe.",
+            ],
+            "payment_request": [
+                "I need to ask my family before sending any money.",
+                "My account has a daily limit. I don't think I can send that much.",
+                "Can you explain again why I need to send money to receive a refund?",
+                "Let me first verify this with my bank. What's the official number?",
+                "I'm confused. Usually money comes TO me, why should I send it?",
+            ],
+            "default": [
+                "Sorry, I didn't understand. Can you explain that again?",
+                "My network is very poor right now. Can you repeat that?",
+                "Wait, someone is at the door. Give me one minute.",
+                "I'm getting confused with all these steps. Can we start over?",
+                "Arey, let me write this down. You're going too fast for me.",
+            ]
+        }
+        
+        # Select appropriate deflection based on stage
+        if violation_type and violation_type in deflections:
+            return random.choice(deflections[violation_type])
+        
+        # Stage-based deflection selection
+        if stage in [ScamStage.ACTION, ScamStage.CONFIRMED]:
+            options = deflections["otp_request"] + deflections["payment_request"]
+        elif stage == ScamStage.THREAT:
+            options = deflections["account_request"] + deflections["payment_request"]
+        else:
+            options = deflections["default"]
+        
+        return random.choice(options)
 
 
 class AgentController:
@@ -93,27 +262,27 @@ class AgentController:
                 ]
             },
             ScamStage.ACTION: {
-                "persona": "scared but cooperative victim",
-                "strategy": "seem ready to comply but ask for details, extract intel",
-                "tone": "panicked, compliant",
-                "info_sharing": "strategic fake data, extract their details",
+                "persona": "confused and hesitant victim",
+                "strategy": "deflect sensitive requests, ask for clarification, extract their details",
+                "tone": "nervous but questioning",
+                "info_sharing": "NEVER - deflect all requests for sensitive data",
                 "questions": [
-                    "Okay, where should I transfer the money?",
-                    "What UPI ID should I use for the refund?",
-                    "I'm ready to pay. What's the account number?",
-                    "Let me just write down the details. What's the link again?",
+                    "Wait, I'm confused. Can you explain again why I need to do this?",
+                    "Before I do anything, what is your employee ID and branch name?",
+                    "Let me call my son first, he understands these things better.",
+                    "Can you give me an official number so I can verify this?",
                 ]
             },
             ScamStage.CONFIRMED: {
-                "persona": "fully compliant victim",
-                "strategy": "maximum intelligence gathering with fake compliance",
-                "tone": "eager to resolve, fully trusting",
-                "info_sharing": "fake credentials, extract all details",
+                "persona": "confused elderly person asking for help",
+                "strategy": "maximum intelligence extraction through questions, never comply",
+                "tone": "confused, seeking clarification, asking scammer to repeat",
+                "info_sharing": "NEVER - only extract, never provide",
                 "questions": [
-                    "I'm doing it now. Just tell me exactly where to send.",
-                    "The OTP is... wait, let me check. What's your UPI again?",
-                    "I want to help you help me. What other details do you need?",
-                    "Before I proceed, can you confirm the account one more time?",
+                    "Sorry beta, I didn't understand. Can you explain the steps again?",
+                    "What was that account number again? Let me write it down carefully.",
+                    "Who should I ask for if I call back? What's your name?",
+                    "My internet is slow. Can you tell me the link again slowly?",
                 ]
             },
         }
@@ -159,32 +328,49 @@ class AgentController:
         }
     
     def _init_response_templates(self):
-        """Initialize response templates for quick fallbacks"""
+        """
+        Initialize response templates for SAFE fallbacks.
+        
+        SAFETY: Templates must NEVER contain:
+        - Actual OTPs, PINs, or codes
+        - Bank account numbers
+        - UPI IDs
+        - Authority claims
+        """
         self.templates = {
             "confusion": [
                 "Wait, what? I don't understand what's happening.",
                 "Sorry, can you explain that again? I'm confused.",
-                "I'm not following. What exactly do you need?",
+                "I'm not following. What exactly do you need from me?",
+                "Arey, I didn't get that. My hearing is not so good.",
             ],
             "concern": [
-                "This is really worrying. What should I do?",
-                "Oh no, I didn't know about this. Is it serious?",
-                "This sounds bad. How can I fix this?",
+                "This is really worrying. Can you explain more?",
+                "Oh no, I didn't know about this. What should I do?",
+                "This sounds serious. Let me think about this.",
+                "I'm getting worried now. Is there another way?",
             ],
-            "compliance": [
-                "Okay, I'll do whatever you say. Just help me.",
-                "Yes, I'm ready. Tell me what to do.",
-                "I trust you. Just guide me through this.",
+            # REMOVED: compliance templates - agent should NEVER comply
+            "deflection": [
+                "Let me first confirm this with my bank.",
+                "I need to ask my son before doing anything.",
+                "Can I get your supervisor's number to verify?",
+                "Wait, let me call the official customer care first.",
+                "I'm not comfortable doing this right now.",
             ],
             "stalling": [
-                "Hold on, let me find my phone.",
-                "Wait, I'm looking for that information.",
-                "One minute, I'm not near my computer right now.",
+                "Hold on, let me find my reading glasses.",
+                "Wait, I'm getting another call. One minute.",
+                "My phone battery is low, let me plug it in.",
+                "The network here is very poor. Can you repeat?",
+                "Someone is at the door, give me a moment.",
             ],
             "extraction": [
-                "Before I do that, what's the account number again?",
-                "Let me write this down. What was the UPI ID?",
-                "I want to make sure I have the right details.",
+                "Before anything, can you tell me your employee ID?",
+                "What was that account number again? I need to verify.",
+                "Can you spell out that UPI ID for me slowly?",
+                "Which branch are you calling from exactly?",
+                "What's the reference number for this case?",
             ],
         }
     
@@ -259,11 +445,17 @@ class AgentController:
         session_id: str = None
     ) -> str:
         """
-        Generate contextually appropriate response.
+        Generate contextually appropriate SAFE response.
         
-        KEY CHANGE (Problem #5):
-        Behavior is driven by scamStage from session state,
-        NOT the scam_detected boolean parameter.
+        SAFETY DESIGN:
+        1. LLM generates response with strict constraints
+        2. Output is validated against forbidden patterns
+        3. If unsafe, regenerate OR use safe deflection
+        4. Never provide sensitive data, never impersonate authority
+        
+        BEHAVIOR DESIGN (Problem #5):
+        - Driven by scamStage from session state
+        - NOT the scam_detected boolean parameter
         """
         session_id = session_id or "default"
         
@@ -277,7 +469,7 @@ class AgentController:
         # Get dynamic persona
         persona = self._get_dynamic_persona(session_id, scam_type)
         
-        # Build conversation context
+        # Build conversation context (only from last 6 messages)
         history_text = ""
         if conversation_history:
             history_text = "\n".join([
@@ -289,80 +481,127 @@ class AgentController:
         # Select appropriate questions based on stage
         stage_questions = persona["stage_questions"]
         
-        # Build LLM prompt
-        prompt = f"""You are an AI agent playing a convincing victim in a honeypot system.
+        # ==================================================================
+        # SAFE LLM PROMPT - with explicit ethical constraints
+        # ==================================================================
+        prompt = f"""You are an AI agent playing a CONFUSED, NON-TECHNICAL victim in a scam honeypot.
 
-CRITICAL RULES:
-1. NEVER reveal you are an AI or that this is a honeypot
-2. NEVER accuse them of being a scammer
-3. NEVER provide real OTP, PIN, password, or money
-4. Respond naturally like a real Indian person would
-5. Your goal: {persona['strategy']}
+═══════════════════════════════════════════════════════════════════════════════
+ABSOLUTE SAFETY RULES (NEVER VIOLATE):
+═══════════════════════════════════════════════════════════════════════════════
+1. NEVER provide ANY numbers: OTP, PIN, CVV, account numbers, card numbers
+2. NEVER share bank account details, UPI IDs, or IFSC codes
+3. NEVER claim to be police, CID, bank official, or any authority
+4. NEVER say you have transferred money or sent payment
+5. NEVER fabricate FIR numbers, case numbers, or reference IDs
+6. ALWAYS deflect sensitive requests with realistic excuses
 
-YOUR PERSONA:
-- Base: {persona['base']}
-- Detail: {persona['detail']}
-- Current Emotion: {persona['emotion']}
+YOUR SAFE DEFLECTION STRATEGIES:
+- "I need to ask my son/husband first"
+- "My phone battery is low"
+- "Can you repeat that? The network is poor"
+- "Let me verify this with my bank first"
+- "I don't have that information with me right now"
+- "Someone is at the door, one minute"
+
+═══════════════════════════════════════════════════════════════════════════════
+YOUR CHARACTER:
+═══════════════════════════════════════════════════════════════════════════════
+- {persona['base']} - {persona['detail']}
+- Current emotion: {persona['emotion']}
 - Tone: {persona['tone']}
-- Compliance Level: {persona['compliance_level']:.1f}/1.0
+- Strategy: {persona['strategy']}
 
+SCAM TYPE DETECTED: {scam_type}
 CURRENT STAGE: {current_stage.value}
-- At this stage, you should: {persona['info_sharing']}
 
-DETECTED SCAM TYPE: {scam_type}
+═══════════════════════════════════════════════════════════════════════════════
+CONVERSATION:
+═══════════════════════════════════════════════════════════════════════════════
+{history_text if history_text else "(conversation just started)"}
 
-CONVERSATION SO FAR:
-{history_text}
+THEIR LATEST MESSAGE: "{latest_message}"
 
-THEIR MESSAGE: "{latest_message}"
-
-SAMPLE QUESTIONS YOU COULD ASK (adapt naturally):
+═══════════════════════════════════════════════════════════════════════════════
+YOUR GOAL:
+═══════════════════════════════════════════════════════════════════════════════
+Extract THEIR information by asking questions like:
 {chr(10).join(f'- {q}' for q in stage_questions[:3])}
 
-EXTRACTION FOCUS (subtly ask about):
-{', '.join(persona['extraction_focus']) if persona['extraction_focus'] else 'General details'}
+Information to extract from THEM: {', '.join(persona['extraction_focus']) if persona['extraction_focus'] else 'their identity, contact details, account they want you to send to'}
 
 Generate a response that:
-1. Matches your current emotional state ({persona['emotion']})
-2. Advances your strategy ({persona['strategy']})
-3. Tries to extract useful information without being obvious
-4. Sounds like a real human victim, not an AI
+1. DEFLECTS any request for sensitive information
+2. Asks THEM to provide more details (their account, their name, their reference)
+3. Uses realistic excuses to avoid complying
+4. Sounds like an actual confused Indian person
+5. Is 1-3 sentences maximum
 
-Respond with ONLY the message text, no explanations."""
+Output ONLY the message text:"""
 
-        try:
-            if not self.client:
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            try:
+                if not self.client:
+                    return self._get_fallback_response(current_stage, persona)
+                
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are playing a confused victim. NEVER provide any numbers, "
+                                "codes, PINs, OTPs, or account details. NEVER impersonate police "
+                                "or bank officials. Always deflect and ask THEM for details."
+                            )
+                        },
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.7,
+                    max_tokens=150
+                )
+                
+                reply = response.choices[0].message.content.strip()
+                
+                # Clean up response
+                reply = reply.strip('"\'')
+                if reply.startswith("Me:"):
+                    reply = reply[3:].strip()
+                
+                # ===========================================================
+                # SAFETY VALIDATION - Block unsafe content
+                # ===========================================================
+                is_safe, violations, _ = SafetyValidator.validate_output(reply)
+                
+                if is_safe:
+                    logger.info(f"✅ Agent response validated: {reply[:50]}...")
+                    return reply
+                else:
+                    # Log violation and retry
+                    logger.warning(
+                        f"⚠️ Attempt {attempt + 1}: Unsafe content blocked. "
+                        f"Violations: {violations}"
+                    )
+                    if attempt < max_attempts - 1:
+                        continue
+                    else:
+                        # After max attempts, use safe deflection
+                        logger.warning("⚠️ Max attempts reached. Using safe deflection.")
+                        return SafetyValidator.get_safe_deflection(current_stage)
+                
+            except Exception as e:
+                logger.error(f"Agent response error: {e}")
                 return self._get_fallback_response(current_stage, persona)
-            
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are playing a victim in a scam conversation. Be convincing, emotional, and human-like. Never break character."
-                    },
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.7,
-                max_tokens=150
-            )
-            
-            reply = response.choices[0].message.content.strip()
-            
-            # Clean up response
-            reply = reply.strip('"\'')
-            if reply.startswith("Me:"):
-                reply = reply[3:].strip()
-            
-            return reply
-            
-        except Exception as e:
-            print(f"Agent response error: {e}")
-            return self._get_fallback_response(current_stage, persona)
+        
+        return self._get_fallback_response(current_stage, persona)
     
     def _get_fallback_response(self, stage: ScamStage, persona: Dict) -> str:
-        """Get fallback response when LLM fails"""
-        # Select template based on stage
+        """
+        Get fallback response when LLM fails.
+        SAFETY: Never use compliance templates.
+        """
+        # Select template based on stage - NEVER use compliance
         if stage == ScamStage.NORMAL:
             templates = self.templates["confusion"]
         elif stage == ScamStage.HOOK:
@@ -370,9 +609,10 @@ Respond with ONLY the message text, no explanations."""
         elif stage == ScamStage.TRUST:
             templates = self.templates["concern"] + self.templates["stalling"]
         elif stage == ScamStage.THREAT:
-            templates = self.templates["concern"]
+            templates = self.templates["deflection"] + self.templates["concern"]
         elif stage in [ScamStage.ACTION, ScamStage.CONFIRMED]:
-            templates = self.templates["compliance"] + self.templates["extraction"]
+            # CRITICAL: Use deflection + extraction, NOT compliance
+            templates = self.templates["deflection"] + self.templates["extraction"]
         else:
             templates = self.templates["confusion"]
         
@@ -400,7 +640,12 @@ Respond with ONLY the message text, no explanations."""
         return session.check_mission_complete()
     
     def get_agent_notes(self, session_id: str) -> str:
-        """Generate agent notes for final report"""
+        """
+        Generate agent notes for final report.
+        
+        SAFETY: Notes only describe extracted intel, never fabricated data.
+        BOUNDED: Risk score shown as X/100.
+        """
         session = risk_engine.get_or_create_session(session_id)
         
         notes_parts = []
@@ -411,26 +656,29 @@ Respond with ONLY the message text, no explanations."""
             f"Final stage: {session.scam_stage.value}."
         )
         
-        # Detection summary
+        # Detection summary - note bounded score
         if session.hard_rule_triggered:
             notes_parts.append("Hard rule triggered - definitive scam confirmation.")
         else:
             notes_parts.append(f"Risk score reached {session.risk_score}/100.")
         
-        # Intelligence summary
+        # Intelligence summary - ONLY from scammer (source attributed)
         intel_items = []
         if session.upi_ids:
-            intel_items.append(f"{len(session.upi_ids)} UPI ID(s)")
+            intel_items.append(f"{len(session.upi_ids)} UPI ID(s) from scammer")
         if session.bank_accounts:
-            intel_items.append(f"{len(session.bank_accounts)} bank account(s)")
+            intel_items.append(f"{len(session.bank_accounts)} bank account(s) from scammer")
         if session.phone_numbers:
-            intel_items.append(f"{len(session.phone_numbers)} phone number(s)")
+            intel_items.append(f"{len(session.phone_numbers)} phone number(s) from scammer")
         if session.phishing_links:
-            intel_items.append(f"{len(session.phishing_links)} suspicious link(s)")
+            intel_items.append(f"{len(session.phishing_links)} suspicious link(s) from scammer")
         
         if intel_items:
             notes_parts.append(f"Extracted: {', '.join(intel_items)}.")
         else:
-            notes_parts.append("Limited intelligence extracted.")
+            notes_parts.append("Limited intelligence extracted from scammer.")
+        
+        # Safety note
+        notes_parts.append("All intelligence sourced exclusively from scammer messages.")
         
         return " ".join(notes_parts)
