@@ -251,7 +251,8 @@ class IntelligenceExtractor:
         text: str, 
         current_intelligence: ExtractedIntelligence,
         session_id: str,
-        turn_number: int
+        turn_number: int,
+        message_source: str = "scammer"
     ) -> ExtractedIntelligence:
         """
         HEAVY EXTRACTION - Runs at THREAT+ stages only.
@@ -263,7 +264,23 @@ class IntelligenceExtractor:
         - Phone numbers
         - URLs/links
         - Telegram/WhatsApp handles
+        
+        ISSUE 5 FIX: INTELLIGENCE PURITY REQUIREMENT
+        -----------------------------------------------------------
+        Heavy extraction must NEVER process agent messages.
+        Any accidental extraction from agent text would contaminate
+        the intelligence with fabricated data (our own deflection
+        phrases, template text, etc.).  This guard is the LAST LINE
+        OF DEFENSE in addition to the check in extract().
         """
+        # ==============================================================
+        # ISSUE 5: HARD SOURCE GUARD — reject non-scammer messages
+        # ==============================================================
+        if message_source != "scammer":
+            logger.warning(f"🛑 extract_heavy() called with source='{message_source}' — REJECTED. "
+                          f"Only scammer messages may be processed for intelligence.")
+            return current_intelligence
+        
         # Initialize extraction history
         if session_id not in self.attributed_extractions:
             self.attributed_extractions[session_id] = []
@@ -327,9 +344,12 @@ class IntelligenceExtractor:
         
         # HEAVY extraction - only at THREAT+ stages
         # This ensures extraction happens AFTER we have enough context
+        # ISSUE 5: message_source is forwarded so extract_heavy() can
+        # independently verify the source (defense-in-depth).
         if scam_stage in [ScamStage.TRUST, ScamStage.THREAT, ScamStage.ACTION, ScamStage.CONFIRMED]:
             current_intelligence = self.extract_heavy(
-                text, current_intelligence, session_id, turn
+                text, current_intelligence, session_id, turn,
+                message_source=message_source
             )
         
         return current_intelligence

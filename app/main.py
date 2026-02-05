@@ -10,6 +10,8 @@ Agent Controller → Heavy Intelligence Extraction → Mission Completion Check
 API REQUEST/RESPONSE FORMAT IS UNCHANGED
 """
 
+import re
+import asyncio
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict
@@ -18,7 +20,7 @@ from .auth import get_api_key
 from .scam_detector import ScamDetector
 from .agent_controller import AgentController
 from .intelligence_extractor import intelligence_extractor
-from .callback_client import send_final_result
+from .callback_client import send_final_result_with_retry
 from .risk_engine import risk_engine, ScamStage
 
 app = FastAPI(title="Scam Honeypot API", version="2.0.0")
@@ -77,8 +79,63 @@ async def chat_handler(request: IncomingRequest, api_key: str = Depends(get_api_
         # Get or create session state
         session = risk_engine.get_or_create_session(session_id)
         
-        # Track message count
-        current_msg_count = len(request.conversationHistory) + 2
+        # ==================================================================
+        # LANGUAGE LOCK: Match scammer's language
+        # ------------------------------------------------------------------
+        # If scammer speaks Hindi → reply in Hindi
+        # If scammer speaks English → reply in English
+        #
+        # Detection is based on FIRST MESSAGE from scammer.
+        # Auto-detect is PRIMARY, metadata is fallback only.
+        # Once locked, language never changes for the session.
+        # ==================================================================
+        if session.locked_language is None:
+            text_lower = request.message.text.lower()
+            
+            # Hindi indicators (Devanagari script OR romanized Hindi words)
+            hindi_words = [
+                'kya', 'hai', 'hain', 'mujhe', 'aap', 'aapka', 'hoon',
+                'nahi', 'bhai', 'beta', 'ji', 'accha', 'theek', 'batao',
+                'bhejo', 'abhi', 'madad', 'mera', 'naam', 'aapke', 'karo',
+                'karna', 'hoga', 'padega', 'dijiye', 'kijiye', 'bolo',
+                'suno', 'dekho', 'jaldi', 'turant', 'paise', 'rupay',
+            ]
+            hindi_count = sum(1 for w in hindi_words if w in text_lower)
+            
+            # Detect language from scammer's first message
+            if re.search(r'[\u0900-\u097F]', text_lower):
+                # Devanagari script detected → definitely Hindi
+                detected_lang = "hindi"
+            elif hindi_count >= 2:
+                # Multiple romanized Hindi words → Hindi
+                detected_lang = "hindi"
+            else:
+                # Default to English if no Hindi detected
+                detected_lang = "english"
+            
+            session.lock_language(detected_lang)
+            print(f"🌐 [{session_id}] Language locked to: {detected_lang} (from scammer's first message)")
+        
+        # ==================================================================
+        # ISSUE 1 FIX: SINGLE SOURCE OF TRUTH FOR CONVERSATION HISTORY
+        # ------------------------------------------------------------------
+        # The API accepts conversationHistory in every request, AND the
+        # SessionState tracks conversation_turns internally.  Using both
+        # causes double-counting, inflated turn counts, and bad summaries.
+        #
+        # RULE: Use incoming conversationHistory ONLY on the FIRST turn
+        # of a session (turn_count == 0).  For all subsequent turns, the
+        # session's internal conversation_turns is the sole authority.
+        # ==================================================================
+        if session.turn_count == 0:
+            # First turn: seed session with any provided history
+            effective_history = request.conversationHistory
+        else:
+            # Subsequent turns: IGNORE incoming history to prevent duplication
+            effective_history = []
+        
+        # Track message count from session state (single source of truth)
+        current_msg_count = session.turn_count + 1
         
         # =====================================================================
         # STEP 1-5: Detection Pipeline (runs on every turn)
@@ -86,7 +143,7 @@ async def chat_handler(request: IncomingRequest, api_key: str = Depends(get_api_
         # =====================================================================
         detection_result = await scam_detector.detect(
             request.message.text, 
-            request.conversationHistory,
+            effective_history,  # Uses guarded history, not raw request
             session_id
         )
         
@@ -110,9 +167,10 @@ async def chat_handler(request: IncomingRequest, api_key: str = Depends(get_api_
             suspiciousKeywords=session.suspicious_keywords.copy(),
         )
         
+        # ISSUE 1 FIX: Pass guarded history, not raw request.conversationHistory
         reply_text = await agent_controller.generate_response(
             request.message.text,
-            request.conversationHistory,
+            effective_history,
             intel,
             detection_result["scamDetected"],
             session_id
@@ -165,18 +223,18 @@ async def chat_handler(request: IncomingRequest, api_key: str = Depends(get_api_
                     agentNotes=agent_notes
                 )
                 
-                # Send callback
-                callback_success = await send_final_result(payload)
-                if callback_success:
-                    print(f"✅ Mission Complete for session {session_id}")
-                    print(f"   Risk Score: {detection_result['risk_score']}")
-                    print(f"   Stage: {detection_result['scam_stage']}")
-                    print(f"   Intel: UPI={len(intel.upiIds)}, "
-                          f"Bank={len(intel.bankAccounts)}, "
-                          f"Phone={len(intel.phoneNumbers)}")
-                else:
-                    print(f"❌ Callback failed for session {session_id}")
-                    session.callback_sent = False  # Allow retry
+                # =========================================================
+                # ISSUE 6 FIX: NON-BLOCKING CALLBACK
+                # ---------------------------------------------------------
+                # The callback is fired in a background task so the API
+                # response is NEVER delayed or blocked by GUVI endpoint
+                # latency or failures.  Retry with exponential backoff
+                # happens inside the background task.
+                # =========================================================
+                asyncio.create_task(
+                    send_final_result_with_retry(payload, session)
+                )
+                print(f"🚀 Callback dispatched (non-blocking) for session {session_id}")
         
         # Return response (format unchanged)
         return AgentResponse(

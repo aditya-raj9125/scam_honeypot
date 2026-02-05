@@ -636,10 +636,29 @@ class SessionState:
             self.trigger_hard_rule(signal.signal_name, 0)
     
     def add_llm_judgement(self, judgement: LLMJudgement):
-        """Add LLM judgement - MUST influence decision"""
+        """
+        Add LLM judgement - MUST influence decision.
+        
+        ISSUE 2 FIX: LLM risk adjustment is CLAMPED to [-10, +20].
+        -----------------------------------------------------------
+        The LLM should NUDGE the risk score, not dominate it.
+        Rule-based scoring is the primary signal; the LLM refines.
+        Clamping prevents a single hallucinated LLM output from
+        causing unstable oscillation or runaway score inflation.
+        
+        Applied AFTER rule-based scoring in the pipeline.
+        """
         self.llm_judgements.append(judgement)
-        if judgement.risk_boost > 0:
-            self.add_risk(judgement.risk_boost, f"LLM: {judgement.reasoning[:50]}")
+        
+        # ISSUE 2: Clamp LLM influence to [-10, +20]
+        clamped_boost = max(-10, min(20, judgement.risk_boost))
+        
+        if clamped_boost > 0:
+            self.add_risk(clamped_boost, f"LLM: {judgement.reasoning[:50]}")
+        elif clamped_boost < 0:
+            # Negative adjustment (LLM thinks it's less risky)
+            self.add_risk(clamped_boost, f"LLM (reduce): {judgement.reasoning[:50]}")
+        
         if judgement.stage_suggestion and judgement.confidence >= 0.7:
             stage_priority = [ScamStage.NORMAL, ScamStage.HOOK, ScamStage.TRUST,
                              ScamStage.THREAT, ScamStage.ACTION, ScamStage.CONFIRMED]

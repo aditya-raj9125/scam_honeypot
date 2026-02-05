@@ -190,21 +190,21 @@ class SafetyValidator:
 
 class AgentController:
     """
-    Autonomous AI agent for honeypot engagement.
+    Natural human-like honeypot agent.
     
-    KEY DESIGN (Problem #5, #6, #7):
-    - Behavior driven by scamStage, NOT scamDetected
-    - Can operate meaningfully at ALL stages
-    - Persona drifts emotionally through conversation
-    - Strategic extraction based on stage
+    DESIGN PHILOSOPHY:
+    - Agent is a CONFUSED ORDINARY USER, not an investigator
+    - Extraction is PASSIVE (extractor handles it, not agent)
+    - Agent asks NATURAL questions a real person would ask
+    - ONE stable persona, ONE locked language, SHORT replies
     
-    NEW FEATURES (Anti-loop, Language lock, Post-detection):
-    - Language locked per session (no random switching)
-    - Post-detection: switches to HIGH-YIELD extraction questions
-    - Anti-loop: tracks questions, blocks repetition
-    - Termination: graceful exit when stalled
-    - Response length: enforced 1-2 sentences max
-    """
+    FEATURES:
+    - Language locked per session (no switching)
+    - Single persona: confused, polite, non-technical
+    - 1-2 sentence replies maximum
+    - Graceful exit when conversation stalls
+    - NO interrogation, NO forced extraction
+    "
     
     def __init__(self):
         api_key = os.getenv("GROQ_API_KEY")
@@ -220,142 +220,126 @@ class AgentController:
     def _init_language_templates(self):
         """
         Language-specific response templates.
-        LANGUAGE LOCK: Agent uses ONLY the locked language.
-        ONE-TWO LINE RULE: All templates are short (1-2 sentences max).
+        
+        DESIGN: Templates are NATURAL, HUMAN responses.
+        - No interrogation or probing questions
+        - Simple clarifications a confused user would ask
+        - Incidental questions, not extraction-focused
         """
         self.language_templates = {
             "hindi": {
+                # Natural confusion - sounds like a real person
                 "confusion": [
-                    "Samajh nahi aaya, phir se bolo?",
-                    "Kya? Thoda clear bolo.",
-                    "Arre, yeh kya hai?",
-                    "Mujhe confusion ho raha hai.",
+                    "Samajh nahi aaya.",
+                    "Kya matlab?",
+                    "Arre, mujhe confuse ho raha hai.",
+                    "Thoda slow bolo na.",
+                    "Acha acha, phir?",
                 ],
+                # Natural stalling - realistic excuses
                 "stalling": [
-                    "Ek minute ruko.",
-                    "Abhi thoda busy hoon.",
-                    "Ruko, koi aaya hai.",
-                    "Network issue hai.",
+                    "Ek second ruko.",
+                    "Haan haan, suno.",
+                    "Achha theek hai.",
+                    "Hmm, phir?",
                 ],
-                "extraction": [
-                    "Paise kahan bhejun? UPI ya bank?",
-                    "Kaunsa app kholna hai?",
-                    "Account number batao.",
-                    "Kya step hai next?",
+                # Natural follow-ups - NOT extraction-focused
+                # These are questions a confused user would naturally ask
+                "followup": [
+                    "Iske baad kya karna hai?",
+                    "Phir kya hoga?",
+                    "Aur kuch karna padega?",
+                    "Kitna time lagega?",
+                    "Aap batayenge na kya karna hai?",
                 ],
+                # Graceful exit - polite, non-confrontational
                 "termination": [
-                    "Theek hai, baad mein baat karte hain.",
-                    "Abhi nahi ho payega, bye.",
-                    "Main bank jaake puchhunga, bye.",
-                    "Baad mein try karta hoon.",
+                    "Theek hai, thodi der baad karta hoon.",
+                    "Abhi phone charge pe lagata hoon.",
+                    "Baad mein baat karte hain.",
+                    "Achha theek hai, sochta hoon.",
                 ]
             },
             "english": {
                 "confusion": [
-                    "What? Say again please.",
-                    "I don't understand.",
-                    "Can you explain?",
+                    "Sorry, didn't understand.",
+                    "What do you mean?",
                     "I'm confused.",
+                    "Can you say that again?",
+                    "Okay okay, then?",
                 ],
                 "stalling": [
-                    "Hold on, one minute.",
-                    "Someone at the door.",
-                    "Network problem.",
-                    "Wait, busy now.",
+                    "One second.",
+                    "Yes yes, go on.",
+                    "Okay, fine.",
+                    "Hmm, then?",
                 ],
-                "extraction": [
-                    "Where to send money?",
-                    "UPI or bank transfer?",
-                    "Which app to open?",
-                    "What's the next step?",
+                "followup": [
+                    "What do I do after that?",
+                    "Then what happens?",
+                    "Anything else I need to do?",
+                    "How long will it take?",
+                    "You'll tell me what to do right?",
                 ],
                 "termination": [
-                    "Okay, will call back later.",
-                    "Let me ask my son, bye.",
-                    "I'll go to bank, bye.",
+                    "Okay, I'll do it later.",
+                    "Let me charge my phone first.",
                     "Talk later, bye.",
+                    "Okay let me think about it.",
                 ]
             }
         }
     
     def _init_post_detection_questions(self):
         """
-        HIGH-YIELD questions for post-detection intelligence extraction.
+        NATURAL follow-up questions for post-detection conversation.
         
-        POST-DETECTION STRATEGY:
-        - STOP identity verification questions (no "who are you")
-        - SWITCH to action-oriented extraction
-        - Ask about payment methods, apps, next steps
-        - ONE-TWO LINE RULE: All questions are short
+        PHILOSOPHY:
+        - These are questions a CONFUSED USER would naturally ask
+        - NOT interrogation or forced extraction
+        - Scammer will reveal info voluntarily while explaining
+        - Extractor captures intelligence passively from scammer replies
         
-        DO NOT ASK: Employee ID, office address, branch details
+        DO NOT:
+        - Ask for employee ID, branch details, account numbers directly
+        - Sound like an investigator
+        - Force scammer to provide specific data
+        
+        DO:
+        - Ask what happens next (natural curiosity)
+        - Ask how long it takes (impatient user)
+        - Ask for clarification (confused user)
         """
-        self.post_detection_questions = {
-            "upi_missing": {
-                "intent": "payment_method",
-                "questions_hindi": [
-                    "UPI ya bank transfer?",
-                    "Kaunsa UPI ID?",
-                    "PhonePe ya GPay?",
-                ],
-                "questions_english": [
-                    "UPI or bank transfer?",
-                    "Which UPI ID?",
-                    "PhonePe or GPay?",
-                ]
-            },
-            "phone_missing": {
-                "intent": "contact_method",
-                "questions_hindi": [
-                    "Aap call karoge?",
-                    "Kaunsa number?",
-                    "WhatsApp ya call?",
-                ],
-                "questions_english": [
-                    "You'll call me?",
-                    "What number?",
-                    "WhatsApp or call?",
-                ]
-            },
-            "link_missing": {
-                "intent": "process_steps",
-                "questions_hindi": [
-                    "Kaunsa app?",
-                    "Link bhejo.",
-                    "Kya download karun?",
-                ],
-                "questions_english": [
-                    "Which app?",
-                    "Send link.",
-                    "What to download?",
-                ]
-            },
-            "account_missing": {
-                "intent": "account_details",
-                "questions_hindi": [
-                    "Account number batao.",
-                    "Kaunsa bank?",
-                    "IFSC kya hai?",
-                ],
-                "questions_english": [
-                    "Account number?",
-                    "Which bank?",
-                    "What's IFSC?",
-                ]
-            },
-            "next_step": {
-                "intent": "next_steps",
-                "questions_hindi": [
-                    "Phir kya karun?",
-                    "Next step kya hai?",
-                    "Aage kya?",
-                ],
-                "questions_english": [
-                    "Then what?",
-                    "Next step?",
-                    "What next?",
-                ]
-            }
+        # Simple pool of natural questions - NOT intelligence-targeted
+        # A real confused person would ask these
+        self.natural_questions = {
+            "hindi": [
+                # Process questions - let scammer explain (reveals method)
+                "Iske baad kya karna hoga?",
+                "Phir kya hoga?",
+                "Kitna time lagega?",
+                "Aur kuch karna padega kya?",
+                # Mild concern - shows engagement (keeps scammer talking)
+                "Koi problem toh nahi hogi na?",
+                "Safe hai na yeh?",
+                "Sahi se ho jayega na?",
+                # Simple acknowledgment + question
+                "Achha, phir?",
+                "Theek hai, aage batao.",
+                "Hmm, phir kya?",
+            ],
+            "english": [
+                "What do I do after that?",
+                "Then what happens?",
+                "How long will it take?",
+                "Do I need to do anything else?",
+                "There won't be any problem right?",
+                "This is safe right?",
+                "It will work properly right?",
+                "Okay, then?",
+                "Alright, go on.",
+                "Hmm, then what?",
+            ]
         }
     
     def _detect_language(self, text: str) -> str:
@@ -451,211 +435,166 @@ class AgentController:
             return "link_missing"
         return "next_step"
     
-    def _get_post_detection_question(
+    def _get_natural_question(
         self, 
         session, 
         language: str,
-        intelligence: ExtractedIntelligence,
         agent_memory: AgentMemory = None
     ) -> Tuple[str, str]:
         """
-        Get a HIGH-YIELD extraction question based on missing intel.
+        Get a NATURAL follow-up question.
+        
+        PHILOSOPHY:
+        - These are NOT extraction questions
+        - They are what a confused user would naturally ask
+        - Scammer reveals info while explaining; extractor catches it
         
         Returns: (question, intent)
-        
-        MEMORY-AWARE: Uses AgentMemory to avoid asking about already-known intel.
-        ANTI-LOOP: Checks if intent already asked 2+ times.
         """
-        missing_type = self._get_missing_intel_type(session, agent_memory)
+        questions = self.natural_questions.get(language, self.natural_questions["hindi"])
         
-        if missing_type and missing_type in self.post_detection_questions:
-            q_data = self.post_detection_questions[missing_type]
-            intent = q_data["intent"]
-            
-            # Check if intent blocked
-            if session.is_question_blocked("", intent):
-                # Try next_step as fallback
-                q_data = self.post_detection_questions["next_step"]
-                intent = q_data["intent"]
-            
-            questions = q_data[f"questions_{language}"]
-            
-            # Find a question not recently asked
-            for q in questions:
-                if not session.is_question_blocked(q, intent):
-                    return q, intent
-            
-            # All blocked, return random from next_step
-            fallback = self.post_detection_questions["next_step"]
-            return random.choice(fallback[f"questions_{language}"]), "next_step"
+        # Find a question not recently asked
+        for q in questions:
+            intent = self._extract_intent_from_response(q)
+            if not session.is_question_blocked(q, intent):
+                return q, intent
         
-        # Default fallback
+        # All questions used - use simple acknowledgments
         templates = self.language_templates.get(language, self.language_templates["hindi"])
-        return random.choice(templates["extraction"]), "generic_extraction"
+        ack = session.get_unused_filler(templates["stalling"])
+        if ack:
+            return ack, "acknowledgment"
+        
+        # Truly exhausted - return simple "phir?"
+        return "Phir?" if language == "hindi" else "Then?", "acknowledgment"
     
     def _init_stage_behaviors(self):
         """
-        Stage-based behavior profiles (Problem #5, #6).
-        Agent behavior is determined by scamStage, NOT scamDetected.
+        Stage-based behavior profiles.
+        
+        SINGLE PERSONA THROUGHOUT:
+        "An ordinary non-technical Indian user who is confused but polite"
+        
+        The persona does NOT change by stage. Only the emotional undertone shifts:
+        - NORMAL/HOOK: Mildly confused
+        - TRUST/THREAT: Worried but cooperative  
+        - ACTION/CONFIRMED: Still confused, slightly anxious
+        
+        NEVER interrogate. NEVER ask for employee ID, branch, account number.
+        Just ask natural follow-up questions that keep scammer talking.
         """
+        # Single consistent persona for all stages
+        base_persona = "confused, polite, non-technical user"
+        
         self.stage_behaviors = {
             ScamStage.NORMAL: {
-                "persona": "curious user, slightly confused",
-                "strategy": "seek clarification, understand context",
-                "tone": "polite, questioning",
-                "info_sharing": "none",
+                "persona": base_persona,
+                "tone": "mildly confused",
                 "questions": [
-                    "I'm sorry, who is this exactly?",
-                    "I don't understand what you're referring to.",
-                    "Could you explain what this is about?",
+                    "Kya? Samjha nahi.",
+                    "Kaun bol raha hai?",
+                    "Sorry, kya bol rahe ho?",
                 ]
             },
             ScamStage.HOOK: {
-                "persona": "confused but engaged citizen",
-                "strategy": "probe for details, seem interested but uncertain",
-                "tone": "confused, slightly worried",
-                "info_sharing": "minimal - only clarifying questions",
+                "persona": base_persona,
+                "tone": "confused, listening",
                 "questions": [
-                    "Wait, what bank are you calling from exactly?",
-                    "I don't recall any such issue. Can you explain?",
-                    "How did you get my number?",
-                    "Is this really from the bank? How can I verify?",
+                    "Achha achha, phir?",
+                    "Theek hai, batao.",
+                    "Haan, sun raha hoon.",
                 ]
             },
             ScamStage.TRUST: {
-                "persona": "cautious person seeking verification",
-                "strategy": "ask for proof, delay while gathering info",
-                "tone": "wary but willing to listen",
-                "info_sharing": "minimal - asking for their details",
+                "persona": base_persona,
+                "tone": "slightly worried",
                 "questions": [
-                    "Can you give me a reference number for this?",
-                    "What is your employee ID?",
-                    "Can I call back on the official number to verify?",
-                    "Why wasn't I notified earlier about this?",
+                    "Koi problem toh nahi hai na?",
+                    "Theek se ho jayega na?",
+                    "Phir kya karna hai?",
                 ]
             },
             ScamStage.THREAT: {
-                "persona": "worried victim, showing fear",
-                "strategy": "express concern, ask about consequences while stalling",
-                "tone": "anxious, seeking reassurance",
-                "info_sharing": "gradual - fake hesitation",
+                "persona": base_persona,
+                "tone": "anxious but cooperative",
                 "questions": [
-                    "Oh no, will I really lose my money?",
-                    "Please don't block my account! What should I do?",
-                    "This is very stressful. How can I fix this quickly?",
-                    "What happens if I don't do this right now?",
+                    "Arre, kya hua? Batao na.",
+                    "Mujhe kya karna chahiye?",
+                    "Jaldi batao, tension ho rahi hai.",
                 ]
             },
             ScamStage.ACTION: {
-                "persona": "confused and hesitant victim",
-                "strategy": "deflect sensitive requests, ask for clarification, extract their details",
-                "tone": "nervous but questioning",
-                "info_sharing": "NEVER - deflect all requests for sensitive data",
+                "persona": base_persona,
+                "tone": "confused, hesitant",
                 "questions": [
-                    "Wait, I'm confused. Can you explain again why I need to do this?",
-                    "Before I do anything, what is your employee ID and branch name?",
-                    "Let me call my son first, he understands these things better.",
-                    "Can you give me an official number so I can verify this?",
+                    "Iske baad kya karna hai?",
+                    "Theek hai, aage batao.",
+                    "Phir kya hoga?",
                 ]
             },
             ScamStage.CONFIRMED: {
-                "persona": "confused elderly person asking for help",
-                "strategy": "maximum intelligence extraction through questions, never comply",
-                "tone": "confused, seeking clarification, asking scammer to repeat",
-                "info_sharing": "NEVER - only extract, never provide",
+                "persona": base_persona,
+                "tone": "confused, tired",
                 "questions": [
-                    "Sorry beta, I didn't understand. Can you explain the steps again?",
-                    "What was that account number again? Let me write it down carefully.",
-                    "Who should I ask for if I call back? What's your name?",
-                    "My internet is slow. Can you tell me the link again slowly?",
+                    "Achha theek hai, phir?",
+                    "Kitna time lagega?",
+                    "Aur kuch karna padega?",
                 ]
             },
         }
     
     def _init_scam_type_behaviors(self):
-        """Initialize scam-type-specific behavior enhancements"""
-        self.scam_type_behaviors = {
-            "bank_kyc": {
-                "emotion_drift": ["confused", "worried", "panicked"],
-                "persona_detail": "elderly person unfamiliar with banking apps",
-                "extraction_focus": ["branch name", "employee ID", "reference number"],
-            },
-            "otp_fraud": {
-                "emotion_drift": ["confused", "trusting", "compliant"],
-                "persona_detail": "busy professional distracted at work",
-                "extraction_focus": ["reason for OTP", "what service", "caller identity"],
-            },
-            "police_impersonation": {
-                "emotion_drift": ["shocked", "terrified", "desperate"],
-                "persona_detail": "law-abiding citizen scared of legal trouble",
-                "extraction_focus": ["case number", "FIR details", "officer name", "station"],
-            },
-            "job_scam": {
-                "emotion_drift": ["excited", "hopeful", "eager"],
-                "persona_detail": "unemployed person seeking work",
-                "extraction_focus": ["company name", "job details", "contact person"],
-            },
-            "loan_scam": {
-                "emotion_drift": ["relieved", "eager", "compliant"],
-                "persona_detail": "person in financial difficulty",
-                "extraction_focus": ["loan terms", "bank name", "processing account"],
-            },
-            "refund_scam": {
-                "emotion_drift": ["surprised", "happy", "cooperative"],
-                "persona_detail": "budget-conscious online shopper",
-                "extraction_focus": ["order details", "refund amount", "payment method"],
-            },
-            "utility_scam": {
-                "emotion_drift": ["panicked", "urgent", "compliant"],
-                "persona_detail": "householder worried about service",
-                "extraction_focus": ["consumer number", "payment account", "amount"],
-            },
-        }
+        """
+        Scam-type behaviors - SIMPLIFIED.
+        
+        We do NOT change persona by scam type anymore.
+        Single consistent persona: confused, polite, non-technical user.
+        
+        This dict is kept for backwards compatibility but is NOT used
+        for persona selection. Extraction focus is removed because
+        extraction is now PASSIVE (extractor handles it).
+        """
+        # Kept minimal for backwards compatibility
+        self.scam_type_behaviors = {}
     
     def _init_response_templates(self):
         """
         Initialize response templates for SAFE fallbacks.
         
-        SAFETY: Templates must NEVER contain:
-        - Actual OTPs, PINs, or codes
-        - Bank account numbers
-        - UPI IDs
-        - Authority claims
+        SIMPLIFIED: No interrogation or extraction templates.
+        Just natural confused user responses.
         """
         self.templates = {
             "confusion": [
-                "Wait, what? I don't understand what's happening.",
-                "Sorry, can you explain that again? I'm confused.",
-                "I'm not following. What exactly do you need from me?",
-                "Arey, I didn't get that. My hearing is not so good.",
+                "Wait, what? I don't understand.",
+                "Sorry, can you explain again?",
+                "I'm confused, what do you mean?",
+                "Arey, samjha nahi.",
             ],
             "concern": [
-                "This is really worrying. Can you explain more?",
-                "Oh no, I didn't know about this. What should I do?",
-                "This sounds serious. Let me think about this.",
-                "I'm getting worried now. Is there another way?",
+                "Is this okay? I'm worried.",
+                "Will there be any problem?",
+                "This sounds serious.",
+                "I'm getting worried now.",
             ],
-            # REMOVED: compliance templates - agent should NEVER comply
             "deflection": [
-                "Let me first confirm this with my bank.",
-                "I need to ask my son before doing anything.",
-                "Can I get your supervisor's number to verify?",
-                "Wait, let me call the official customer care first.",
-                "I'm not comfortable doing this right now.",
+                "Let me think about it.",
+                "I need to ask my family first.",
+                "Okay, I'll do it later.",
+                "Wait, someone is calling me.",
             ],
             "stalling": [
-                "Hold on, let me find my reading glasses.",
-                "Wait, I'm getting another call. One minute.",
-                "My phone battery is low, let me plug it in.",
-                "The network here is very poor. Can you repeat?",
-                "Someone is at the door, give me a moment.",
+                "Hold on, one minute.",
+                "Wait, my phone is low battery.",
+                "Network is poor here.",
+                "Someone is at the door.",
             ],
-            "extraction": [
-                "Before anything, can you tell me your employee ID?",
-                "What was that account number again? I need to verify.",
-                "Can you spell out that UPI ID for me slowly?",
-                "Which branch are you calling from exactly?",
-                "What's the reference number for this case?",
+            # REMOVED extraction templates - no interrogation
+            "followup": [
+                "Then what happens?",
+                "What do I do next?",
+                "How long will this take?",
+                "Okay, then?",
             ],
         }
     
@@ -691,32 +630,29 @@ class AgentController:
         session_id: str,
         scam_type: str
     ) -> Dict:
-        """Get dynamic persona based on current emotional state"""
+        """
+        Get persona - SIMPLIFIED to single consistent persona.
+        
+        PHILOSOPHY: One stable persona throughout the conversation.
+        "An ordinary non-technical Indian user who is confused but polite"
+        
+        We do NOT vary persona by scam type or emotional drift.
+        Consistency > theatrics.
+        """
         session = risk_engine.get_or_create_session(session_id)
-        persona_state = session.persona_state
         current_stage = session.scam_stage
         
-        # Get base behavior from stage
+        # Get stage behavior (but persona is same across all stages)
         stage_behavior = self.stage_behaviors.get(
             current_stage, 
             self.stage_behaviors[ScamStage.NORMAL]
         )
         
-        # Get scam-type specific enhancements
-        type_behavior = self.scam_type_behaviors.get(scam_type, {})
-        
-        # Build dynamic persona
+        # Single consistent persona - no dynamic changes
         persona = {
-            "base": stage_behavior["persona"],
-            "detail": type_behavior.get("persona_detail", ""),
-            "emotion": persona_state.current_emotion.value,
-            "compliance_level": persona_state.compliance_level,
-            "trust_level": persona_state.trust_level,
-            "strategy": stage_behavior["strategy"],
+            "base": "confused, polite, non-technical user",
             "tone": stage_behavior["tone"],
-            "info_sharing": stage_behavior["info_sharing"],
             "stage_questions": stage_behavior["questions"],
-            "extraction_focus": type_behavior.get("extraction_focus", []),
         }
         
         return persona
@@ -764,19 +700,16 @@ class AgentController:
         current_stage = session.scam_stage
         
         # ===================================================================
-        # LANGUAGE LOCKING: Detect and lock language for session
+        # LANGUAGE LOCKING (ISSUE 3 FIX)
+        # -------------------------------------------------------------------
+        # Language is now locked IMMEDIATELY at session creation in main.py,
+        # using metadata.language or auto-detection from the first message.
+        # By this point, locked_language is ALWAYS set.  The fallback here
+        # is a safety net that should never trigger in normal operation.
         # ===================================================================
         if session.locked_language is None:
-            # Detect from first scammer message or conversation history
-            detected_lang = self._detect_language(latest_message)
-            # Check history for language hints
-            if conversation_history:
-                for msg in conversation_history[-3:]:
-                    text = msg.text if hasattr(msg, 'text') else msg.get('text', '')
-                    if self._detect_language(text) == "hindi":
-                        detected_lang = "hindi"
-                        break
-            session.lock_language(detected_lang)
+            # Safety fallback only — main.py should have locked this already
+            session.lock_language(self._detect_language(latest_message))
         
         language = session.get_locked_language() or "hindi"
         
@@ -813,33 +746,29 @@ class AgentController:
             return termination_response
         
         # ===================================================================
-        # POST-DETECTION STRATEGY: Switch to high-yield extraction
+        # POST-DETECTION: Natural conversation flow
+        # -------------------------------------------------------------------
+        # PHILOSOPHY: Agent is a confused user, NOT an interrogator.
+        # We ask NATURAL questions - scammer reveals info while explaining.
+        # Extractor captures intelligence passively from scammer messages.
         # ===================================================================
         if scam_detected or current_stage in [ScamStage.ACTION, ScamStage.CONFIRMED, ScamStage.THREAT]:
-            # Use post-detection extraction questions instead of identity verification
-            # Pass agent_memory for context-aware question selection
-            extraction_question, intent = self._get_post_detection_question(
-                session, language, intelligence, agent_memory
+            # Get a natural question (not extraction-focused)
+            natural_question, intent = self._get_natural_question(
+                session, language, agent_memory
             )
             
             # Track this question to prevent loops
-            session.add_question(extraction_question, intent)
+            session.add_question(natural_question, intent)
             
             # Check stall condition
             session.check_stall()
             
-            # Use template-based response for consistency (no LLM randomness)
-            logger.info(f"🎯 Post-detection mode: intent={intent}, lang={language}, memory_context={agent_memory.questions_already_asked}")
+            logger.info(f"💬 Natural response: intent={intent}, lang={language}")
             
-            # Build a short, focused response
-            response = await self._generate_post_detection_response(
-                latest_message, 
-                extraction_question, 
-                language, 
-                session, 
-                current_stage,
-                agent_memory
-            )
+            # Build simple response - just the natural question
+            # NO confusion filler + question combo - keep it simple
+            response = natural_question
             
             # Record agent response for memory
             session.add_turn("agent", response, intent)
@@ -866,32 +795,32 @@ class AgentController:
         lang_instruction = "Respond in Hindi (Romanized)" if language == "hindi" else "Respond in English"
         
         # ===================================================================
-        # MEMORY-AWARE LLM PROMPT
+        # MEMORY-AWARE LLM PROMPT - SIMPLIFIED PERSONA
+        # -------------------------------------------------------------------
+        # Agent is a CONFUSED ORDINARY USER, not an investigator.
+        # No probing questions, no identity verification, no forced extraction.
+        # Just natural confused responses that keep conversation going.
         # ===================================================================
         
         # Build anti-repeat instruction from memory
         already_asked_str = ", ".join(agent_memory.questions_already_asked[-5:]) if agent_memory.questions_already_asked else "nothing yet"
         
-        prompt = f"""You are a CONFUSED victim. {lang_instruction}.
+        prompt = f"""You are a CONFUSED, NON-TECHNICAL Indian user. {lang_instruction}.
 
-CONTEXT (from memory):
-{memory_context}
-
-CONVERSATION STATE:
-- Turn: {agent_memory.turn_count}
-- Stage: {agent_memory.current_stage}
-- Already asked about: {already_asked_str}
+You are NOT an investigator. You are an ordinary person who doesn't understand what's happening.
 
 RULES:
-- MAX 15 WORDS total
-- 1 sentence ONLY
-- Never share OTP/PIN/account
-- Sound confused
-- DO NOT repeat questions about: {already_asked_str}
+- MAX 10 WORDS total
+- 1 short sentence ONLY  
+- Sound confused, not smart
+- Ask simple clarification like "phir kya?" or "samjha nahi"
+- NEVER ask for employee ID, branch name, account details
+- NEVER sound investigative or probing
+- Just be a confused person
 
-Message: "{latest_message[:100]}"
+Message: "{latest_message[:80]}"
 
-Reply with 1 short confused sentence (different from what was already asked):"""
+Reply with 1 very short confused response:"""
 
         max_attempts = 2
         for attempt in range(max_attempts):
@@ -906,12 +835,12 @@ Reply with 1 short confused sentence (different from what was already asked):"""
                     messages=[
                         {
                             "role": "system",
-                            "content": f"Confused victim. {lang_instruction}. MAX 15 words. 1 sentence only. DO NOT repeat: {already_asked_str}"
+                            "content": f"You are a confused ordinary Indian user. {lang_instruction}. MAX 10 words. Very short. Never ask probing questions."
                         },
                         {"role": "user", "content": prompt}
                     ],
-                    temperature=0.5,
-                    max_tokens=30  # Strict limit for short responses
+                    temperature=0.4,
+                    max_tokens=25  # Even stricter for shorter responses
                 )
                 
                 reply = response.choices[0].message.content.strip()
@@ -961,35 +890,22 @@ Reply with 1 short confused sentence (different from what was already asked):"""
     async def _generate_post_detection_response(
         self,
         scammer_message: str,
-        extraction_question: str,
+        question: str,
         language: str,
         session,
         stage: ScamStage,
         agent_memory: AgentMemory = None
     ) -> str:
         """
-        Generate post-detection response with extraction question.
+        Generate post-detection response.
         
-        MEMORY-AWARE:
-        - Uses AgentMemory to avoid repeating questions
-        - Adapts based on what's already been asked
+        SIMPLIFIED: Just return the natural question directly.
+        No need for confusion filler + question combo.
         
-        TEMPLATE-FIRST APPROACH for consistency:
-        - Use short templates, not LLM
-        - Append extraction question
-        - Total response: 1-2 short sentences
+        A real confused user would just ask one simple thing.
         """
-        # Get language templates
-        templates = self.language_templates.get(language, self.language_templates["hindi"])
-        
-        # Get an unused confusion filler
-        confusion = session.get_unused_filler(templates["confusion"])
-        if not confusion:
-            # All fillers used, just use extraction question alone
-            return extraction_question
-        
-        # Combine: short confusion + extraction question
-        return f"{confusion} {extraction_question}"
+        # Just return the question - simple is better
+        return question
     
     def _enforce_length_limit(self, text: str, max_sentences: int = 2) -> str:
         """
@@ -1008,23 +924,77 @@ Reply with 1 short confused sentence (different from what was already asked):"""
         logger.info(f"✂️ Truncated response from {len(sentences)} to {max_sentences} sentences")
         return truncated
     
+    # ==================================================================
+    # ISSUE 4 FIX: SEMANTIC INTENT TAXONOMY
+    # ------------------------------------------------------------------
+    # Intent tracking must use SEMANTIC categories, not lexical matches.
+    # A fixed taxonomy prevents loops from bypassing safeguards via
+    # rephrasing (e.g. "UPI batao" vs "Kaise bhejun" are both
+    # payment_method at the semantic level).
+    #
+    # CANONICAL INTENTS:
+    #   identity_verification  – who are you, name, employee ID
+    #   payment_method         – UPI, bank transfer, how to pay
+    #   next_action_step       – next step, what to do, process
+    #   contact_method         – call, WhatsApp, phone number
+    #   delay_excuse           – stalling, busy, network, battery
+    #   account_details        – account number, IFSC, bank name
+    #   app_or_link            – download app, open link, QR
+    #   generic                – fallback for unclassifiable
+    # ==================================================================
+    SEMANTIC_INTENT_MAP = {
+        # identity_verification
+        "identity_verification": [
+            "naam", "name", "who", "kaun", "kon", "employee",
+            "officer", "branch", "department", "designation",
+            "pehchaan", "id", "badge", "credential",
+        ],
+        # payment_method
+        "payment_method": [
+            "upi", "transfer", "payment", "paise", "paisa", "bhej",
+            "pay", "money", "rupee", "rs", "send", "gpay", "phonepe",
+            "paytm", "neft", "imps", "rtgs", "amount",
+        ],
+        # next_action_step
+        "next_action_step": [
+            "step", "next", "kaise", "kya karun", "process",
+            "procedure", "aage", "phir", "then", "how",
+            "karna", "karna hai",
+        ],
+        # contact_method
+        "contact_method": [
+            "call", "phone", "number", "whatsapp", "message",
+            "contact", "dial", "ring", "sms",
+        ],
+        # delay_excuse
+        "delay_excuse": [
+            "wait", "ruko", "busy", "network", "battery",
+            "baad", "later", "minute", "hold", "door",
+            "charge", "signal", "glasses",
+        ],
+        # account_details
+        "account_details": [
+            "account", "bank", "ifsc", "passbook", "branch",
+            "savings", "current", "a/c",
+        ],
+        # app_or_link
+        "app_or_link": [
+            "app", "link", "download", "install", "qr",
+            "scan", "website", "url", "click",
+        ],
+    }
+
     def _extract_intent_from_response(self, response: str) -> str:
         """
-        Extract the intent/question type from an agent response.
-        Used for anti-loop tracking.
+        Map agent response to a SEMANTIC intent from the fixed taxonomy.
+        
+        ISSUE 4 FIX: Uses broad keyword sets per semantic category
+        so rephrased questions still map to the same intent.
+        Anti-loop checks operate on these canonical intents.
         """
         response_lower = response.lower()
         
-        intent_patterns = {
-            "identity": ["naam", "name", "who", "kaun", "kon"],
-            "payment_method": ["upi", "transfer", "payment", "paise", "paisa", "bhej"],
-            "contact": ["call", "phone", "number", "whatsapp"],
-            "process": ["app", "link", "download", "step", "kaise"],
-            "account": ["account", "bank", "ifsc"],
-            "verification": ["verify", "confirm", "check"],
-        }
-        
-        for intent, keywords in intent_patterns.items():
+        for intent, keywords in self.SEMANTIC_INTENT_MAP.items():
             if any(kw in response_lower for kw in keywords):
                 return intent
         
@@ -1033,26 +1003,32 @@ Reply with 1 short confused sentence (different from what was already asked):"""
     def _get_fallback_response_language(self, stage: ScamStage, language: str) -> str:
         """
         Get fallback response in the locked language.
+        
+        SIMPLIFIED: Use natural responses, not extraction-focused.
         """
         templates = self.language_templates.get(language, self.language_templates["hindi"])
         
-        if stage == ScamStage.NORMAL:
+        # All stages use the same simple confused responses
+        # No extraction templates anymore
+        if stage in [ScamStage.NORMAL, ScamStage.HOOK]:
             return random.choice(templates["confusion"])
-        elif stage in [ScamStage.HOOK, ScamStage.TRUST]:
-            options = templates["confusion"] + templates["stalling"]
-            return random.choice(options)
-        elif stage in [ScamStage.THREAT, ScamStage.ACTION, ScamStage.CONFIRMED]:
-            options = templates["extraction"] + templates["stalling"]
+        elif stage in [ScamStage.TRUST, ScamStage.THREAT]:
+            # Mix confusion and followup
+            options = templates["confusion"] + templates["followup"]
             return random.choice(options)
         else:
-            return random.choice(templates["confusion"])
+            # ACTION/CONFIRMED - natural followups
+            options = templates["followup"] + templates["stalling"]
+            return random.choice(options)
     
     def _get_fallback_response(self, stage: ScamStage, persona: Dict) -> str:
         """
         Get fallback response when LLM fails.
-        SAFETY: Never use compliance templates.
+        
+        SIMPLIFIED: No extraction or interrogation templates.
+        Just natural confused user responses.
         """
-        # Select template based on stage - NEVER use compliance
+        # All stages use simple confused responses
         if stage == ScamStage.NORMAL:
             templates = self.templates["confusion"]
         elif stage == ScamStage.HOOK:
@@ -1062,8 +1038,8 @@ Reply with 1 short confused sentence (different from what was already asked):"""
         elif stage == ScamStage.THREAT:
             templates = self.templates["deflection"] + self.templates["concern"]
         elif stage in [ScamStage.ACTION, ScamStage.CONFIRMED]:
-            # CRITICAL: Use deflection + extraction, NOT compliance
-            templates = self.templates["deflection"] + self.templates["extraction"]
+            # Use followup + stalling, NOT extraction
+            templates = self.templates["followup"] + self.templates["stalling"]
         else:
             templates = self.templates["confusion"]
         
