@@ -146,12 +146,16 @@ async def chat_handler(request: IncomingRequest, api_key: str = Depends(get_api_
         # Agent behavior is driven by scamStage, NOT scamDetected boolean
         # =====================================================================
         
-        # Build intelligence object for agent
+        # Build intelligence object for agent (includes all new fields)
         intel = ExtractedIntelligence(
             upiIds=session.upi_ids.copy(),
             bankAccounts=session.bank_accounts.copy(),
             phoneNumbers=session.phone_numbers.copy(),
             phishingLinks=session.phishing_links.copy(),
+            emailAddresses=session.email_addresses.copy(),
+            caseIds=session.case_ids.copy(),
+            policyNumbers=session.policy_numbers.copy(),
+            orderNumbers=session.order_numbers.copy(),
             suspiciousKeywords=session.suspicious_keywords.copy(),
         )
         
@@ -189,49 +193,51 @@ async def chat_handler(request: IncomingRequest, api_key: str = Depends(get_api_
                     message_source="scammer"
                 )
         
-        # Sync extracted intel back to session
+        # Sync extracted intel back to session (including new fields)
         session.upi_ids = intel.upiIds.copy()
         session.bank_accounts = intel.bankAccounts.copy()
         session.phone_numbers = intel.phoneNumbers.copy()
         session.phishing_links = intel.phishingLinks.copy()
+        session.email_addresses = intel.emailAddresses.copy()
+        session.case_ids = intel.caseIds.copy()
+        session.policy_numbers = intel.policyNumbers.copy()
+        session.order_numbers = intel.orderNumbers.copy()
         session.suspicious_keywords = intel.suspiciousKeywords.copy()
         
         # =====================================================================
-        # STEP 8: Mission Completion Check
-        # Only send callback when mission is truly complete
+        # STEP 8: Final Output Submission
+        # FIXED: Always send callback once scamDetected (not gated by
+        # mission_complete), so evaluation system always receives our data.
+        # Re-send on every turn to keep intel current (last send wins).
         # =====================================================================
-        if detection_result["scamDetected"] and not session.callback_sent:
-            mission_complete = await agent_controller.check_mission_complete(
-                intel, session_id
+        if detection_result["scamDetected"]:
+            # Generate agent notes
+            agent_notes = agent_controller.get_agent_notes(session_id)
+
+            # Determine scam type from most recent LLM judgement
+            scam_type = None
+            for j in reversed(session.llm_judgements):
+                if j.scam_type:
+                    scam_type = j.scam_type
+                    break
+
+            # Build payload with ALL scored fields
+            payload = FinalResultPayload(
+                sessionId=session_id,
+                scamDetected=True,
+                totalMessagesExchanged=current_msg_count,
+                engagementDurationSeconds=session.get_engagement_duration(),
+                extractedIntelligence=intel,
+                agentNotes=agent_notes,
+                scamType=scam_type,
+                confidenceLevel=round(detection_result.get("confidence", 0.9), 3),
             )
-            
-            if mission_complete:
-                session.callback_sent = True
-                
-                # Generate agent notes
-                agent_notes = agent_controller.get_agent_notes(session_id)
-                
-                # Build payload
-                payload = FinalResultPayload(
-                    sessionId=session_id,
-                    scamDetected=True,
-                    totalMessagesExchanged=current_msg_count,
-                    extractedIntelligence=intel,
-                    agentNotes=agent_notes
-                )
-                
-                # =========================================================
-                # ISSUE 6 FIX: NON-BLOCKING CALLBACK
-                # ---------------------------------------------------------
-                # The callback is fired in a background task so the API
-                # response is NEVER delayed or blocked by GUVI endpoint
-                # latency or failures.  Retry with exponential backoff
-                # happens inside the background task.
-                # =========================================================
-                asyncio.create_task(
-                    send_final_result_with_retry(payload, session)
-                )
-                print(f"🚀 Callback dispatched (non-blocking) for session {session_id}")
+
+            # Non-blocking background dispatch — API response never delayed
+            asyncio.create_task(
+                send_final_result_with_retry(payload, session)
+            )
+            print(f"🚀 Callback dispatched (turn {session.turn_count}) for session {session_id}")
         
         # Return response (format unchanged)
         return AgentResponse(

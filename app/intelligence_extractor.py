@@ -79,37 +79,41 @@ class IntelligenceExtractor:
     
     def _init_patterns(self):
         """Initialize regex patterns for HEAVY extraction"""
-        
-        # UPI IDs (all major providers)
+
+        # UPI IDs — generic: word@word (domain has no hyphens, no TLD after domain)
+        # \b after domain prevents backtracking to sub-word matches (e.g. @fak from @fake-bank.com)
         self.patterns = {
             "upi": re.compile(
-                r'[a-zA-Z0-9._-]{2,256}@(?:upi|paytm|okaxis|okicici|okhdfcbank|oksbi|ybl|apl|ibl|axl|'
-                r'kotak|icici|sbi|hdfc|axis|idfcfirst|indus|federal|rbl|yes|pnb|boi|bob|canara|'
-                r'union|idbi|citi|hsbc|sc|dbs|ubi|equitas|bandhan|au|fino|payzapp|airtel|jio|'
-                r'waicici|wahdfcbank|wasbi|waaxis|freecharge|mobikwik|amazonpay|phonepe|gpay)',
+                r'[a-zA-Z0-9._+\-]{2,256}@[a-zA-Z][a-zA-Z0-9]{1,63}\b(?![-]|[.][a-zA-Z]{2,6})',
                 re.IGNORECASE
             ),
-            
+
             # Bank account numbers (9-18 digits)
             "bank_account": re.compile(r'\b\d{9,18}\b'),
-            
+
             # IFSC codes
             "ifsc": re.compile(r'\b[A-Z]{4}0[A-Z0-9]{6}\b', re.IGNORECASE),
-            
+
             # Indian phone numbers
             "phone_indian": re.compile(
                 r'(?:\+91[\s.-]?)?(?:0)?[6-9]\d{9}|'
                 r'\+91\s?\d{5}\s?\d{5}|'
                 r'[6-9]\d{2}[\s.-]?\d{3}[\s.-]?\d{4}'
             ),
-            
+
+            # Email addresses
+            "email": re.compile(
+                r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}',
+                re.IGNORECASE
+            ),
+
             # URLs
             "url": re.compile(
                 r'https?://(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b'
                 r'(?:[-a-zA-Z0-9()@:%_\+.~#?&//=]*)',
                 re.IGNORECASE
             ),
-            
+
             # Shortened URLs (highly suspicious)
             "short_url": re.compile(
                 r'(?:bit\.ly|tinyurl\.com|t\.co|goo\.gl|ow\.ly|is\.gd|buff\.ly|'
@@ -117,20 +121,42 @@ class IntelligenceExtractor:
                 r'v\.gd|tr\.im|clck\.ru|bc\.vc|ouo\.io)/[\w\-]+',
                 re.IGNORECASE
             ),
-            
+
+            # Case / Reference IDs  e.g.  SBI-12345, CID/2024/001, REF#98765
+            "case_id": re.compile(
+                r'\b(?:case|ref(?:erence)?|ticket|complaint|fir|id|no|number)[.\-/#\s]{0,3}'
+                r'[A-Z0-9][A-Z0-9\-/]{3,}\b'
+                r'|\b[A-Z]{2,6}[-/]\d{4}[-/]?\d{3,}\b'
+                r'|\bcase\s+(?:no\.?|number|id)[:\s]+[A-Z0-9\-/]{4,}\b',
+                re.IGNORECASE
+            ),
+
+            # Policy numbers  (INS-xxxxx, POL/xxxx, plain numeric 6-12 digits with context)
+            "policy_number": re.compile(
+                r'\b(?:policy|pol|insurance)[.\-/#\s]{0,3}[A-Z0-9][A-Z0-9\-/]{4,}\b',
+                re.IGNORECASE
+            ),
+
+            # Order / transaction numbers
+            "order_number": re.compile(
+                r'\b(?:order|txn|transaction|tracking|shipment|delivery)[.\-/#\s]{0,3}'
+                r'[A-Z0-9][A-Z0-9\-/]{4,}\b',
+                re.IGNORECASE
+            ),
+
             # Telegram handles
             "telegram": re.compile(r'(?:t\.me/|telegram\.me/|@)([a-zA-Z][a-zA-Z0-9_]{4,31})', re.IGNORECASE),
-            
+
             # WhatsApp links
             "whatsapp": re.compile(r'(?:wa\.me/|whatsapp\.com/send\?phone=)(\+?\d{10,15})', re.IGNORECASE),
-            
+
             # Remote access app mentions
             "remote_apps": re.compile(
                 r'\b(?:anydesk|teamviewer|quicksupport|ammyy|ultraviewer|'
                 r'airdroid|screenconnect|supremo|rustdesk)\b',
                 re.IGNORECASE
             ),
-            
+
             # QR code mentions
             "qr_code": re.compile(
                 r'\b(?:qr\s*code|scan\s*(?:this|the)?\s*qr|qr\s*scan)\b',
@@ -287,16 +313,25 @@ class IntelligenceExtractor:
         
         # Extract UPI IDs
         self._extract_upi_ids(text, current_intelligence, turn_number, session_id)
-        
+
         # Extract bank accounts
         self._extract_bank_accounts(text, current_intelligence, turn_number, session_id)
-        
+
         # Extract phone numbers
         self._extract_phone_numbers(text, current_intelligence, turn_number, session_id)
-        
+
         # Extract URLs
         self._extract_urls(text, current_intelligence, turn_number, session_id)
-        
+
+        # Extract email addresses (NEW)
+        self._extract_emails(text, current_intelligence, turn_number, session_id)
+
+        # Extract case/reference IDs (NEW)
+        self._extract_case_ids(text, current_intelligence, turn_number, session_id)
+
+        # Extract policy and order numbers (NEW)
+        self._extract_policy_order_numbers(text, current_intelligence, turn_number, session_id)
+
         # Extract additional intel (telegram, remote apps, etc.)
         self._extract_additional_intel(text, current_intelligence, turn_number, session_id)
         
@@ -342,15 +377,12 @@ class IntelligenceExtractor:
             if kw not in current_intelligence.suspiciousKeywords:
                 current_intelligence.suspiciousKeywords.append(kw)
         
-        # HEAVY extraction - only at THREAT+ stages
-        # This ensures extraction happens AFTER we have enough context
-        # ISSUE 5: message_source is forwarded so extract_heavy() can
-        # independently verify the source (defense-in-depth).
-        if scam_stage in [ScamStage.HOOK, ScamStage.TRUST, ScamStage.THREAT, ScamStage.ACTION, ScamStage.CONFIRMED]:
-            current_intelligence = self.extract_heavy(
-                text, current_intelligence, session_id, turn,
-                message_source=message_source
-            )
+        # HEAVY extraction — always run on scammer messages (never miss early planted intel)
+        # Defense-in-depth: message_source forwarded so extract_heavy() can independently verify.
+        current_intelligence = self.extract_heavy(
+            text, current_intelligence, session_id, turn,
+            message_source=message_source
+        )
         
         return current_intelligence
     
@@ -361,11 +393,20 @@ class IntelligenceExtractor:
         turn: int, 
         session_id: str
     ):
-        """Extract UPI IDs with validation"""
+        """Extract UPI IDs with validation.
+        UPI IDs have a domain WITHOUT dots (e.g. user@ybl, pay@okaxis).
+        Addresses with dots in the domain are emails, not UPI IDs.
+        """
         matches = self.patterns["upi"].findall(text)
         for upi in matches:
             upi = upi.strip().lower()
-            if upi and upi not in intel.upiIds and '@' in upi and len(upi) >= 5:
+            if not upi or '@' not in upi or len(upi) < 5:
+                continue
+            domain_part = upi.split('@', 1)[1]
+            # UPI domains never contain dots; skip if they do (it's an email)
+            if '.' in domain_part:
+                continue
+            if upi not in intel.upiIds:
                 intel.upiIds.append(upi)
                 self._record_extraction(session_id, upi, "upi", 0.9, turn, text[:50])
     
@@ -452,6 +493,68 @@ class IntelligenceExtractor:
                 intel.phishingLinks.append(full_url)
                 self._record_extraction(session_id, full_url, "short_url", 0.95, turn, text[:50])
     
+    def _extract_emails(
+        self,
+        text: str,
+        intel: ExtractedIntelligence,
+        turn: int,
+        session_id: str
+    ):
+        """Extract email addresses.
+        Real emails have at least one dot in the domain (e.g. fake-bank.com).
+        UPI IDs like 'user@ybl' are excluded because their domain has no dot.
+        """
+        matches = self.patterns["email"].findall(text)
+        for email in matches:
+            email = email.strip().lower()
+            if '@' not in email:
+                continue
+            domain_part = email.split('@', 1)[1]
+            # Only accept if domain has at least one dot (real email)
+            if '.' not in domain_part:
+                continue
+            tld = domain_part.rsplit('.', 1)[-1]
+            if len(tld) < 2 or len(tld) > 6:
+                continue
+            if email not in intel.emailAddresses:
+                intel.emailAddresses.append(email)
+                self._record_extraction(session_id, email, "email", 0.92, turn, text[:50])
+
+    def _extract_case_ids(
+        self,
+        text: str,
+        intel: ExtractedIntelligence,
+        turn: int,
+        session_id: str
+    ):
+        """Extract case / reference IDs."""
+        matches = self.patterns["case_id"].findall(text)
+        for cid in matches:
+            cid = cid.strip()
+            if cid and cid not in intel.caseIds and len(cid) >= 4:
+                intel.caseIds.append(cid)
+                self._record_extraction(session_id, cid, "case_id", 0.80, turn, text[:50])
+
+    def _extract_policy_order_numbers(
+        self,
+        text: str,
+        intel: ExtractedIntelligence,
+        turn: int,
+        session_id: str
+    ):
+        """Extract insurance policy and order/transaction numbers."""
+        for pol in self.patterns["policy_number"].findall(text):
+            pol = pol.strip()
+            if pol and pol not in intel.policyNumbers:
+                intel.policyNumbers.append(pol)
+                self._record_extraction(session_id, pol, "policy_number", 0.78, turn, text[:50])
+
+        for ord_num in self.patterns["order_number"].findall(text):
+            ord_num = ord_num.strip()
+            if ord_num and ord_num not in intel.orderNumbers:
+                intel.orderNumbers.append(ord_num)
+                self._record_extraction(session_id, ord_num, "order_number", 0.78, turn, text[:50])
+
     def _extract_additional_intel(
         self, 
         text: str, 

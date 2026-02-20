@@ -244,7 +244,14 @@ class SessionState:
         self.bank_accounts: List[str] = []
         self.phone_numbers: List[str] = []
         self.phishing_links: List[str] = []
+        self.email_addresses: List[str] = []
+        self.case_ids: List[str] = []
+        self.policy_numbers: List[str] = []
+        self.order_numbers: List[str] = []
         self.suspicious_keywords: List[str] = []
+
+        # Engagement tracking
+        self.start_time: datetime = datetime.now()
         
         # Persona state
         self.persona_state: PersonaState = PersonaState()
@@ -477,13 +484,15 @@ class SessionState:
             "bank_accounts": self.bank_accounts.copy(),
             "phone_numbers": self.phone_numbers.copy(),
             "phishing_links": self.phishing_links.copy(),
+            "email_addresses": self.email_addresses.copy(),
+            "case_ids": self.case_ids.copy(),
             "suspicious_keywords": self.suspicious_keywords[:10]  # Limit
         }
     
     def get_missing_intelligence(self) -> List[str]:
         """
         Determine what intelligence is still missing.
-        
+
         Returns list of intelligence types we still need.
         """
         missing = []
@@ -495,6 +504,8 @@ class SessionState:
             missing.append("phone_number")
         if not self.phishing_links:
             missing.append("phishing_link")
+        if not self.email_addresses:
+            missing.append("email_address")
         return missing
     
     def get_asked_intents_list(self) -> List[str]:
@@ -689,34 +700,35 @@ class SessionState:
                    (len(self.phone_numbers) > 0 and len(self.phishing_links) > 0))
     
     def check_mission_complete(self) -> bool:
-        """Check if mission is complete with explicit criteria"""
+        """
+        Check if mission is complete.
+        FIXED: Always fire once scamDetected=True and at least 2 turns have passed.
+        This ensures the final callback is ALWAYS sent.
+        """
         if self.mission_complete:
             return True
         if not self.scam_detected:
             return False
-        has_intel = self.has_high_value_intel()
-        min_turns = self.turn_count >= 5
-        action_signals = [s for s in self.triggered_signals 
-                         if s.signal_type in ["financial", "otp_request", "payment_request"]]
-        repeated_demands = len(action_signals) >= 3
-        if has_intel and (min_turns or repeated_demands):
-            self.mission_complete = True
-            return True
-        if self.turn_count >= 25:
+        # Fire as soon as we detect a scam with at least 2 turns of engagement
+        if self.turn_count >= 2:
             self.mission_complete = True
             return True
         return False
+
+    def get_engagement_duration(self) -> int:
+        """Return engagement duration in seconds since session start."""
+        return int((datetime.now() - self.start_time).total_seconds())
     
     def to_dict(self) -> Dict:
         """
         Convert state to dictionary for API responses.
-        
+
         BOUNDED SCORE: risk_score is guaranteed 0-100
         """
         return {
             "session_id": self.session_id,
-            "risk_score": self.risk_score,  # Guaranteed 0-100
-            "risk_score_max": 100,  # For UI display purposes
+            "risk_score": self.risk_score,
+            "risk_score_max": 100,
             "scam_stage": self.scam_stage.value,
             "scam_detected": self.scam_detected,
             "hard_rule_triggered": self.hard_rule_triggered,
@@ -725,8 +737,10 @@ class SessionState:
             "upi_ids": self.upi_ids,
             "bank_accounts": self.bank_accounts,
             "phone_numbers": self.phone_numbers,
+            "email_addresses": self.email_addresses,
             "persona_emotion": self.persona_state.current_emotion.value,
             "mission_complete": self.mission_complete,
+            "engagement_duration_seconds": self.get_engagement_duration(),
         }
 
 

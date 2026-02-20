@@ -16,6 +16,9 @@ import random
 import logging
 from typing import Dict, List, Optional, Tuple
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from groq import Groq
 from .models import ExtractedIntelligence
 from .risk_engine import risk_engine, ScamStage, AgentMemory
@@ -63,7 +66,7 @@ class AgentController:
     def __init__(self):
         api_key = os.getenv("GROQ_API_KEY")
         self.client = Groq(api_key=api_key) if api_key else None
-        self.model = "llama-3.3-70b-versatile"
+        self.model = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
         self._init_templates()
     
     def _init_templates(self):
@@ -309,33 +312,37 @@ class AgentController:
         
         prompt = f"""{persona}
 
-{lang_instruction}. MAX 20 WORDS. 1-2 short sentences only.
+{lang_instruction}. MAX 35 WORDS. 2-3 short sentences. Ask ONE clear investigative question.
 
 CONVERSATION SO FAR:
 {conv_context}
-Them (latest): "{latest_message[:150]}"
+Them (latest): "{latest_message[:200]}"
 
 CONTEXT: {memory_context}
 
 CRITICAL RULES:
 - NEVER share real OTP, PIN, password, or bank details
 - NEVER reveal you are a bot or AI
-- NEVER sound like an investigator
-- Sound like a REAL confused Indian person
-- Keep the scammer talking and engaged
-- Try to extract their payment details (UPI, account, phone, link) naturally
+- NEVER sound like an investigator or use detective language
+- Sound like a REAL confused Indian person (aam aadmi)
+- Keep the scammer talking and engaged for as many turns as possible
+- Ask about: their name, employee ID/badge, company address, website, phone number,
+  supervisor name, when they will fix the issue, why they need OTP/payment
+- Try to extract their contact details (phone, UPI, account, link) naturally
+- Mention specific red flags you noticed (urgency, threats, fee requests) in a confused way
+- If they ask for money, ask WHERE exactly to send (extract UPI/account) and HOW MUCH
 
-Your short reply:"""
+Your reply (sound confused/worried, ask a question, MAX 35 words):"""
 
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": f"You are an ordinary confused Indian person. {lang_instruction}. MAX 20 words. Never share real sensitive data. Keep scammer engaged."},
+                    {"role": "system", "content": f"You are an ordinary confused Indian person. {lang_instruction}. MAX 35 words. Never share real sensitive data. Keep scammer engaged with questions."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.5,
-                max_tokens=50
+                temperature=0.6,
+                max_tokens=100
             )
             
             reply = response.choices[0].message.content.strip().strip('"\'')
@@ -375,37 +382,69 @@ Your short reply:"""
         return session.check_mission_complete()
     
     def get_agent_notes(self, session_id: str) -> str:
-        """Generate agent notes for final report."""
+        """Generate detailed agent notes for the final report."""
         session = risk_engine.get_or_create_session(session_id)
-        
-        notes = [f"Engaged scammer over {session.turn_count} turns. Final stage: {session.scam_stage.value}."]
-        
+
+        notes = []
+        notes.append(f"Honeypot engaged scammer over {session.turn_count} turn(s). "
+                     f"Final risk score: {session.risk_score}/100. Stage: {session.scam_stage.value}.")
+
+        # Red flags identified
+        red_flags = []
         if session.hard_rule_triggered:
-            notes.append("Hard rule triggered - definitive scam confirmation.")
-        else:
-            notes.append(f"Risk score reached {session.risk_score}/100.")
-        
-        # Add scam type from LLM judgements
-        scam_types = set()
-        for j in session.llm_judgements:
-            if j.scam_type:
-                scam_types.add(j.scam_type)
+            red_flags.append("hard scam rule triggered (OTP/PIN/payment request)")
+        for sig in session.triggered_signals[:10]:
+            if sig.description and sig.description not in red_flags:
+                red_flags.append(sig.description.lower())
+        # LLM-identified red flags
+        for j in session.llm_judgements[-3:]:
+            for flag in j.red_flags[:3]:
+                if flag.lower() not in red_flags:
+                    red_flags.append(flag.lower())
+        if red_flags:
+            notes.append(f"Red flags identified: {'; '.join(red_flags[:8])}.")
+
+        # Scam type(s)
+        scam_types = list({j.scam_type for j in session.llm_judgements if j.scam_type})
         if scam_types:
-            notes.append(f"Scam type(s) identified: {', '.join(scam_types)}.")
-        
+            notes.append(f"Scam type(s): {', '.join(scam_types)}.")
+
+        # Tactics observed
+        tactics = []
+        if any("urgency" in (s.description or "").lower() for s in session.triggered_signals):
+            tactics.append("urgency pressure")
+        if any("authority" in (s.description or "").lower() for s in session.triggered_signals):
+            tactics.append("authority impersonation")
+        if any("threat" in (s.description or "").lower() for s in session.triggered_signals):
+            tactics.append("threats of legal/financial consequences")
+        if any("otp" in (s.description or "").lower() for s in session.triggered_signals):
+            tactics.append("OTP/PIN harvesting attempt")
+        if any("payment" in (s.description or "").lower() for s in session.triggered_signals):
+            tactics.append("money transfer demand")
+        if any("remote" in (s.description or "").lower() for s in session.triggered_signals):
+            tactics.append("remote access request (AnyDesk/TeamViewer)")
+        if tactics:
+            notes.append(f"Tactics used: {', '.join(tactics)}.")
+
+        # Intel extracted
         intel_items = []
         if session.upi_ids:
-            intel_items.append(f"{len(session.upi_ids)} UPI ID(s)")
+            intel_items.append(f"{len(session.upi_ids)} UPI ID(s): {', '.join(session.upi_ids[:3])}")
         if session.bank_accounts:
             intel_items.append(f"{len(session.bank_accounts)} bank account(s)")
         if session.phone_numbers:
-            intel_items.append(f"{len(session.phone_numbers)} phone number(s)")
+            intel_items.append(f"{len(session.phone_numbers)} phone number(s): {', '.join(session.phone_numbers[:3])}")
         if session.phishing_links:
-            intel_items.append(f"{len(session.phishing_links)} suspicious link(s)")
-        
+            intel_items.append(f"{len(session.phishing_links)} phishing link(s)")
+        if session.email_addresses:
+            intel_items.append(f"{len(session.email_addresses)} email address(es)")
         if intel_items:
-            notes.append(f"Extracted from scammer: {', '.join(intel_items)}.")
+            notes.append(f"Intelligence extracted: {'; '.join(intel_items)}.")
         else:
-            notes.append("Limited intelligence extracted.")
-        
+            notes.append("Scammer did not share payment details during engagement.")
+
+        # Elicitation attempts
+        questions_asked = len(session.question_intents)
+        notes.append(f"Agent asked {questions_asked} investigative question(s) to elicit scammer information.")
+
         return " ".join(notes)
