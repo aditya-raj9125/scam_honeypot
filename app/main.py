@@ -117,24 +117,12 @@ async def chat_handler(request: IncomingRequest, api_key: str = Depends(get_api_
             print(f"🌐 [{session_id}] Language locked to: {detected_lang} (from scammer's first message)")
         
         # ==================================================================
-        # ISSUE 1 FIX: SINGLE SOURCE OF TRUTH FOR CONVERSATION HISTORY
-        # ------------------------------------------------------------------
-        # The API accepts conversationHistory in every request, AND the
-        # SessionState tracks conversation_turns internally.  Using both
-        # causes double-counting, inflated turn counts, and bad summaries.
-        #
-        # RULE: Use incoming conversationHistory ONLY on the FIRST turn
-        # of a session (turn_count == 0).  For all subsequent turns, the
-        # session's internal conversation_turns is the sole authority.
+        # CONVERSATION HISTORY - Always use incoming history for context
+        # The detector needs full conversation context for accurate detection
         # ==================================================================
-        if session.turn_count == 0:
-            # First turn: seed session with any provided history
-            effective_history = request.conversationHistory
-        else:
-            # Subsequent turns: IGNORE incoming history to prevent duplication
-            effective_history = []
+        effective_history = request.conversationHistory
         
-        # Track message count from session state (single source of truth)
+        # Track message count from session state
         current_msg_count = session.turn_count + 1
         
         # =====================================================================
@@ -183,14 +171,23 @@ async def chat_handler(request: IncomingRequest, api_key: str = Depends(get_api_
         # =====================================================================
         current_stage = ScamStage(detection_result["scam_stage"])
         
-        # Extract intelligence ONLY from scammer message (source attribution)
+        # Extract intelligence from scammer message - runs from HOOK stage
         intel = intelligence_extractor.extract(
             request.message.text,
             intel,
             session_id,
             scam_stage=current_stage,
-            message_source="scammer"  # CRITICAL: Explicit source attribution
+            message_source="scammer"
         )
+        
+        # Also extract from conversation history messages (scammer only)
+        for hist_msg in effective_history:
+            if hasattr(hist_msg, 'sender') and hist_msg.sender == 'scammer':
+                intel = intelligence_extractor.extract(
+                    hist_msg.text, intel, session_id,
+                    scam_stage=current_stage,
+                    message_source="scammer"
+                )
         
         # Sync extracted intel back to session
         session.upi_ids = intel.upiIds.copy()

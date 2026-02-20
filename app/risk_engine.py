@@ -561,20 +561,21 @@ class SessionState:
         """
         Update scam stage based on risk thresholds.
         
-        THRESHOLD MAPPING (Problem #9 - Explainable):
-        - 0-24:   NORMAL  (no action)
-        - 25-49:  HOOK    (initial suspicion)
-        - 50-69:  THREAT  (confirmed tactics)
-        - 70-100: CONFIRMED (definitive scam)
+        AGGRESSIVE THRESHOLD MAPPING:
+        - 0-14:   NORMAL  (no action)
+        - 15-29:  HOOK    (initial suspicion)
+        - 30-44:  THREAT  (confirmed tactics)
+        - 45-100: CONFIRMED (definitive scam)
         """
-        if self.risk_score >= 70:
+        if self.risk_score >= 45:
             if self.scam_stage != ScamStage.CONFIRMED:
                 self._transition_stage(ScamStage.CONFIRMED)
             self.scam_detected = True
-        elif self.risk_score >= 50:
+        elif self.risk_score >= 30:
             if self.scam_stage not in [ScamStage.THREAT, ScamStage.ACTION, ScamStage.CONFIRMED]:
                 self._transition_stage(ScamStage.THREAT)
-        elif self.risk_score >= 25:
+            self.scam_detected = True
+        elif self.risk_score >= 15:
             if self.scam_stage == ScamStage.NORMAL:
                 self._transition_stage(ScamStage.HOOK)
     
@@ -637,36 +638,31 @@ class SessionState:
     
     def add_llm_judgement(self, judgement: LLMJudgement):
         """
-        Add LLM judgement - MUST influence decision.
+        Add LLM judgement - PRIMARY influence on detection.
         
-        ISSUE 2 FIX: LLM risk adjustment is CLAMPED to [-10, +20].
-        -----------------------------------------------------------
-        The LLM should NUDGE the risk score, not dominate it.
-        Rule-based scoring is the primary signal; the LLM refines.
-        Clamping prevents a single hallucinated LLM output from
-        causing unstable oscillation or runaway score inflation.
-        
-        Applied AFTER rule-based scoring in the pipeline.
+        LLM risk adjustment clamped to [-10, +40].
+        LLM is the PRIMARY detector, so it has HIGH influence.
         """
         self.llm_judgements.append(judgement)
         
-        # ISSUE 2: Clamp LLM influence to [-10, +20]
-        clamped_boost = max(-10, min(20, judgement.risk_boost))
+        # LLM influence: [-10, +40] — HIGH influence as primary detector
+        clamped_boost = max(-10, min(40, judgement.risk_boost))
         
         if clamped_boost > 0:
             self.add_risk(clamped_boost, f"LLM: {judgement.reasoning[:50]}")
         elif clamped_boost < 0:
-            # Negative adjustment (LLM thinks it's less risky)
             self.add_risk(clamped_boost, f"LLM (reduce): {judgement.reasoning[:50]}")
         
-        if judgement.stage_suggestion and judgement.confidence >= 0.7:
+        # Stage suggestion — accept at lower confidence (0.5)
+        if judgement.stage_suggestion and judgement.confidence >= 0.5:
             stage_priority = [ScamStage.NORMAL, ScamStage.HOOK, ScamStage.TRUST,
                              ScamStage.THREAT, ScamStage.ACTION, ScamStage.CONFIRMED]
             current_priority = stage_priority.index(self.scam_stage)
             suggested_priority = stage_priority.index(judgement.stage_suggestion)
             if suggested_priority > current_priority:
                 self._transition_stage(judgement.stage_suggestion)
-        if judgement.is_scam_likely and judgement.confidence >= 0.85:
+        # LLM confidence >= 0.65 directly sets scamDetected
+        if judgement.is_scam_likely and judgement.confidence >= 0.65:
             self.scam_detected = True
     
     def update_stage_from_patterns(self, detected_patterns: List[str]):
@@ -744,9 +740,9 @@ class CumulativeRiskEngine:
     3. Clear thresholds: ≥25 SUSPICIOUS, ≥50 THREAT, ≥70 CONFIRMED
     """
     
-    THRESHOLD_SUSPICIOUS = 25
-    THRESHOLD_THREAT = 50
-    THRESHOLD_CONFIRMED = 70
+    THRESHOLD_SUSPICIOUS = 15
+    THRESHOLD_THREAT = 30
+    THRESHOLD_CONFIRMED = 45
     
     def __init__(self):
         self.sessions: Dict[str, SessionState] = {}
@@ -1131,14 +1127,16 @@ class CumulativeRiskEngine:
         turn_number: int
     ):
         """Apply ML prediction as signal (Problem #12 - influences, doesn't override)"""
-        if not ml_is_scam or ml_confidence < 0.6:
+        if not ml_is_scam or ml_confidence < 0.4:
             return
         
         if ml_confidence >= 0.9:
-            score = 25
+            score = 30
         elif ml_confidence >= 0.8:
-            score = 18
+            score = 22
         elif ml_confidence >= 0.7:
+            score = 16
+        elif ml_confidence >= 0.5:
             score = 12
         else:
             score = 8

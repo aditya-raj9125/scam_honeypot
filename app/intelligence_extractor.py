@@ -346,7 +346,7 @@ class IntelligenceExtractor:
         # This ensures extraction happens AFTER we have enough context
         # ISSUE 5: message_source is forwarded so extract_heavy() can
         # independently verify the source (defense-in-depth).
-        if scam_stage in [ScamStage.TRUST, ScamStage.THREAT, ScamStage.ACTION, ScamStage.CONFIRMED]:
+        if scam_stage in [ScamStage.HOOK, ScamStage.TRUST, ScamStage.THREAT, ScamStage.ACTION, ScamStage.CONFIRMED]:
             current_intelligence = self.extract_heavy(
                 text, current_intelligence, session_id, turn,
                 message_source=message_source
